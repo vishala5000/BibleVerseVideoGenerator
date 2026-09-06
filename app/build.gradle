@@ -5,19 +5,17 @@ plugins {
 
 android {
     namespace 'com.bibledailyshine.generator'
+
     compileSdk 35
 
     defaultConfig {
         applicationId 'com.bibledailyshine.generator'
+
         minSdk 24
         targetSdk 35
 
         versionCode 1
         versionName '1.0'
-
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
-        }
     }
 
     buildTypes {
@@ -40,7 +38,11 @@ android {
         resources {
             excludes += [
                     '/META-INF/{AL2.0,LGPL2.1}',
-                    '/META-INF/DEPENDENCIES'
+                    '/META-INF/DEPENDENCIES',
+                    '/META-INF/LICENSE',
+                    '/META-INF/LICENSE.txt',
+                    '/META-INF/NOTICE',
+                    '/META-INF/NOTICE.txt'
             ]
         }
     }
@@ -58,7 +60,10 @@ android {
 }
 
 dependencies {
+
     implementation 'androidx.core:core-ktx:1.15.0'
+
     implementation 'androidx.appcompat:appcompat:1.7.0'
+
     implementation 'io.github.minorlai:ffmpeg-kit-16kb:6.1.2'
 }
