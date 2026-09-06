@@ -30,6 +30,9 @@ jobs:
       - name: Build release APK
         run: |
           chmod +x ./gradlew
+          mkdir -p "$HOME/.gradle/wrapper/dists"
+          find "$HOME/.gradle/wrapper/dists" -type f -name gradle -exec chmod +x {} \; 2>/dev/null || true
+          find "$HOME/.gradle/wrapper/dists" -type f -path "*/gradle-8.10.2/bin/gradle" -exec chmod +x {} \; 2>/dev/null || true
           ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Upload APK
