@@ -1,0 +1,18 @@
+THIRD-PARTY NOTICE
+
+This project uses:
+
+1. FFmpegKit Android 16KB build
+   Maven coordinate: io.github.minorlai:ffmpeg-kit-16kb:6.1.2
+   Project: https://github.com/minorlai/ffmpeg-kit-android-16KB
+   License information is provided by the upstream project and Maven metadata.
+
+2. AndroidX Core KTX and AndroidX AppCompat
+   These are distributed under their respective Apache 2.0 licensing terms.
+
+3. Default font.ttf
+   The included default font is DejaVu Sans.
+   DejaVu Fonts are licensed under the Bitstream Vera and DejaVu font licenses.
+   Replace app/src/main/assets/font.ttf with your own licensed font if desired.
+
+The included bg.mp3 is a generated silent placeholder audio file. Replace it with your own music/audio file if desired.
