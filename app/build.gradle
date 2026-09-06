@@ -1,3 +1,8 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
 android {
     namespace 'com.bibledailyshine.generator'
 
@@ -28,6 +33,19 @@ android {
         }
     }
 
+    packaging {
+        resources {
+            excludes += [
+                    '/META-INF/{AL2.0,LGPL2.1}',
+                    '/META-INF/DEPENDENCIES',
+                    '/META-INF/LICENSE',
+                    '/META-INF/LICENSE.txt',
+                    '/META-INF/NOTICE',
+                    '/META-INF/NOTICE.txt'
+            ]
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
@@ -36,4 +54,10 @@ android {
     kotlinOptions {
         jvmTarget = '21'
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'io.github.minorlai:ffmpeg-kit-16kb:6.1.2'
 }
