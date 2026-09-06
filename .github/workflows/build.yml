@@ -2,7 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -27,13 +29,19 @@ jobs:
         run: |
           java -version
 
+      - name: Download Gradle 8.10.2
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
+          unzip -q gradle-8.10.2-bin.zip -d "$HOME"
+          chmod +x "$HOME/gradle-8.10.2/bin/gradle"
+
       - name: Build release APK
         run: |
-          chmod +x ./gradlew
-          mkdir -p "$HOME/.gradle/wrapper/dists"
-          find "$HOME/.gradle/wrapper/dists" -type f -name gradle -exec chmod +x {} \; 2>/dev/null || true
-          find "$HOME/.gradle/wrapper/dists" -type f -path "*/gradle-8.10.2/bin/gradle" -exec chmod +x {} \; 2>/dev/null || true
-          ./gradlew --no-daemon --stacktrace assembleRelease
+          chmod +x "$HOME/gradle-8.10.2/bin/gradle"
+          "$HOME/gradle-8.10.2/bin/gradle" \
+            --no-daemon \
+            --stacktrace \
+            assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
