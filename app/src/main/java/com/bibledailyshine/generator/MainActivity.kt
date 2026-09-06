@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.net.Uri
@@ -20,433 +21,1510 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val WIDTH = 1080
-        private const val HEIGHT = 1920
-        private const val TEXT_WIDTH = 680
-        private const val TEXT_HEIGHT = 1320
-        private const val SAFE_TOP = 200
-        private const val SAFE_BOTTOM = 200
-        private const val HEADING = "Bible Verse"
-        private const val HEADING_Y = 200f
-        private const val BLOCK_TOP = 400f
-        private const val BLOCK_BOTTOM = 1720f
-        private const val VIDEO_SECONDS = 8
-        private const val FPS = 30
-        private const val CREATE_ZIP_REQUEST = 9001
+
+        private const val VIDEO_WIDTH = 1080
+        private const val VIDEO_HEIGHT = 1920
+
+        private const val VIDEO_DURATION_SECONDS = 8
+
+        private const val VIDEO_FPS = 30
+
+        private const val TOP_RESERVED = 200
+        private const val BOTTOM_RESERVED = 200
+
+        private const val TEXT_LEFT = 200
+        private const val TEXT_RIGHT = 200
+
+        private const val MAX_TEXT_WIDTH = 680
+
+        private const val VERSE_AREA_TOP = 400
+        private const val VERSE_AREA_BOTTOM = 1720
+
+        private const val MAX_VERSE_HEIGHT =
+            VERSE_AREA_BOTTOM - VERSE_AREA_TOP
+
+        private const val MAX_VERSE_FONT_SIZE = 80f
+        private const val MIN_VERSE_FONT_SIZE = 28f
+
+        private const val HEADING_FONT_SIZE = 82f
+        private const val REFERENCE_FONT_SIZE = 52f
+
+        private const val HEADING_TEXT = "Bible Verse"
+
+        private const val HEADING_COLOR = Color.YELLOW
+        private const val REFERENCE_COLOR = Color.YELLOW
+        private const val VERSE_COLOR = Color.WHITE
+        private const val BACKGROUND_COLOR = Color.BLACK
+
+        private const val MUSIC_VOLUME = 0.20f
+
+        private const val CREATE_DOCUMENT_REQUEST = 5001
+
+        private const val ASSET_FONT = "font.ttf"
+        private const val ASSET_MUSIC = "bg.mp3"
     }
 
-    private lateinit var input: EditText
+    private lateinit var verseInput: EditText
     private lateinit var generateButton: Button
     private lateinit var saveButton: Button
-    private lateinit var progress: ProgressBar
-    private lateinit var status: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var statusText: TextView
 
-    private var generatedZip: File? = null
-    private var generating = false
+    private val executor: ExecutorService =
+        Executors.newSingleThreadExecutor()
+
+    private val generating = AtomicBoolean(false)
+
+    private val generatedVideos = mutableListOf<File>()
+
+    private var currentZipFile: File? = null
+
+    private var customTypeface: Typeface? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
+
+        customTypeface = loadFont()
+
+        buildUserInterface()
     }
 
-    private fun buildUi() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(28, 24, 28, 24)
-            setBackgroundColor(android.graphics.Color.BLACK)
+    override fun onDestroy() {
+        super.onDestroy()
+
+        generating.set(false)
+
+        executor.shutdownNow()
+    }
+
+    private fun buildUserInterface() {
+
+        val rootScroll = ScrollView(this)
+
+        rootScroll.setBackgroundColor(Color.rgb(18, 18, 18))
+
+        val root = LinearLayout(this)
+
+        root.orientation = LinearLayout.VERTICAL
+
+        root.setPadding(
+            dp(18),
+            dp(18),
+            dp(18),
+            dp(24)
+        )
+
+        root.gravity = Gravity.CENTER_HORIZONTAL
+
+        rootScroll.addView(
+            root,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val title = TextView(this)
+
+        title.text = "Bible Verse Video Generator"
+
+        title.textSize = 24f
+
+        title.setTextColor(Color.WHITE)
+
+        title.gravity = Gravity.CENTER
+
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+
+        root.addView(
+            title,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(10)
+            }
+        )
+
+        val subtitle = TextView(this)
+
+        subtitle.text =
+            "Enter one Bible verse per line.\nEach line creates one separate 8-second video."
+
+        subtitle.textSize = 15f
+
+        subtitle.setTextColor(Color.LTGRAY)
+
+        subtitle.gravity = Gravity.CENTER
+
+        root.addView(
+            subtitle,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(16)
+            }
+        )
+
+        verseInput = EditText(this)
+
+        verseInput.setTextColor(Color.WHITE)
+
+        verseInput.setHintTextColor(Color.GRAY)
+
+        verseInput.setHint(
+            "Example:\nBe strong and courageous. Do not be afraid; do not be discouraged. — Joshua 1:9"
+        )
+
+        verseInput.textSize = 16f
+
+        verseInput.gravity = Gravity.TOP or Gravity.START
+
+        verseInput.setPadding(
+            dp(14),
+            dp(14),
+            dp(14),
+            dp(14)
+        )
+
+        verseInput.setSingleLine(false)
+
+        verseInput.minLines = 10
+
+        verseInput.maxLines = 20
+
+        verseInput.isVerticalScrollBarEnabled = true
+
+        verseInput.setBackgroundColor(
+            Color.rgb(35, 35, 35)
+        )
+
+        root.addView(
+            verseInput,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(260)
+            ).apply {
+                bottomMargin = dp(14)
+            }
+        )
+
+        generateButton = Button(this)
+
+        generateButton.text = "GENERATE VIDEOS"
+
+        generateButton.textSize = 16f
+
+        generateButton.setTextColor(Color.BLACK)
+
+        generateButton.setBackgroundColor(
+            Color.rgb(255, 214, 0)
+        )
+
+        generateButton.setOnClickListener {
+            startGeneration()
         }
 
-        val title = TextView(this).apply {
-            text = "Bible Verse Video Generator"
-            textSize = 24f
-            setTextColor(android.graphics.Color.YELLOW)
-            gravity = Gravity.CENTER
-        }
-        root.addView(title, LinearLayout.LayoutParams(-1, -2))
+        root.addView(
+            generateButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(54)
+            ).apply {
+                bottomMargin = dp(10)
+            }
+        )
 
-        val info = TextView(this).apply {
-            text = "Enter ONE Bible verse per line. Format: Verse text — Book Chapter:Verse\nExample: Be strong and courageous. Do not be afraid; do not be discouraged. — Joshua 1:9"
-            textSize = 15f
-            setTextColor(android.graphics.Color.LTGRAY)
-            setPadding(0, 18, 0, 18)
-        }
-        root.addView(info, LinearLayout.LayoutParams(-1, -2))
+        saveButton = Button(this)
 
-        input = EditText(this).apply {
-            hint = "Enter Bible verses, one per line..."
-            setHintTextColor(android.graphics.Color.GRAY)
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 17f
-            gravity = Gravity.TOP or Gravity.START
-            setPadding(20, 20, 20, 20)
-            setBackgroundColor(android.graphics.Color.rgb(28, 28, 28))
-            minLines = 10
-            maxLines = 18
-        }
-        root.addView(input, LinearLayout.LayoutParams(-1, 0, 1f))
+        saveButton.text = "SAVE ALL VIDEOS AS ZIP"
 
-        generateButton = Button(this).apply {
-            text = "GENERATE VIDEOS"
-            textSize = 16f
-        }
-        root.addView(generateButton, LinearLayout.LayoutParams(-1, 58).apply { topMargin = 18 })
+        saveButton.textSize = 16f
 
-        saveButton = Button(this).apply {
-            text = "SAVE ALL VIDEOS AS ZIP"
-            textSize = 16f
-            visibility = View.GONE
-        }
-        root.addView(saveButton, LinearLayout.LayoutParams(-1, 58).apply { topMargin = 10 })
+        saveButton.isEnabled = false
 
-        progress = ProgressBar(this).apply {
-            isIndeterminate = false
-            max = 100
-            progress = 0
-            visibility = View.GONE
+        saveButton.setOnClickListener {
+            saveZip()
         }
-        root.addView(progress, LinearLayout.LayoutParams(-1, 12).apply { topMargin = 12 })
 
-        status = TextView(this).apply {
-            text = "Ready."
-            textSize = 14f
-            setTextColor(android.graphics.Color.LTGRAY)
-            setPadding(0, 12, 0, 0)
-        }
-        root.addView(status, LinearLayout.LayoutParams(-1, -2))
+        root.addView(
+            saveButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(54)
+            ).apply {
+                bottomMargin = dp(16)
+            }
+        )
 
-        generateButton.setOnClickListener { startGeneration() }
-        saveButton.setOnClickListener { saveZip() }
+        progressBar = ProgressBar(
+            this,
+            null,
+            android.R.attr.progressBarStyleHorizontal
+        )
 
-        val scroll = ScrollView(this).apply {
-            addView(root)
-        }
-        setContentView(scroll)
+        progressBar.max = 100
+
+        progressBar.progress = 0
+
+        root.addView(
+            progressBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(8)
+            ).apply {
+                bottomMargin = dp(12)
+            }
+        )
+
+        statusText = TextView(this)
+
+        statusText.text =
+            "Ready. Add your Bible verses and press Generate Videos."
+
+        statusText.textSize = 14f
+
+        statusText.setTextColor(Color.LTGRAY)
+
+        statusText.gravity = Gravity.CENTER
+
+        root.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        setContentView(rootScroll)
     }
 
     private fun startGeneration() {
-        if (generating) return
 
-        val verses = input.text.toString()
-            .replace("\r\n", "\n")
-            .split('\n')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-
-        if (verses.isEmpty()) {
-            toast("Enter at least one Bible verse.")
+        if (generating.get()) {
             return
         }
 
-        generating = true
+        val rawText =
+            verseInput.text?.toString()?.trim().orEmpty()
+
+        if (rawText.isBlank()) {
+
+            Toast.makeText(
+                this,
+                "Enter at least one Bible verse.",
+                Toast.LENGTH_LONG
+            ).show()
+
+            return
+        }
+
+        val lines = rawText
+            .split("\n")
+            .map {
+                it.trim()
+                    .replace("\r", "")
+            }
+            .filter {
+                it.isNotBlank()
+            }
+
+        if (lines.isEmpty()) {
+
+            Toast.makeText(
+                this,
+                "No valid verses found.",
+                Toast.LENGTH_LONG
+            ).show()
+
+            return
+        }
+
+        if (!assetExists(ASSET_FONT)) {
+
+            showError(
+                "Missing font.ttf in app assets."
+            )
+
+            return
+        }
+
+        if (!assetExists(ASSET_MUSIC)) {
+
+            showError(
+                "Missing bg.mp3 in app assets."
+            )
+
+            return
+        }
+
+        generating.set(true)
+
+        generatedVideos.clear()
+
+        currentZipFile = null
+
         generateButton.isEnabled = false
-        saveButton.visibility = View.GONE
-        progress.visibility = View.VISIBLE
-        progress.progress = 0
-        status.text = "Preparing..."
 
-        Thread {
+        saveButton.isEnabled = false
+
+        progressBar.progress = 0
+
+        setStatus(
+            "Preparing ${lines.size} video(s)..."
+        )
+
+        executor.execute {
+
             try {
-                val work = File(cacheDir, "bible_video_work").apply {
-                    deleteRecursively()
-                    mkdirs()
-                }
-                val audio = File(work, "bg.mp3")
-                val font = File(work, "font.ttf")
-                copyAsset("bg.mp3", audio)
-                copyAsset("font.ttf", font)
 
-                val videos = mutableListOf<File>()
-                verses.forEachIndexed { index, line ->
+                val outputDirectory =
+                    File(
+                        cacheDir,
+                        "generated_videos"
+                    )
+
+                if (outputDirectory.exists()) {
+                    outputDirectory.deleteRecursively()
+                }
+
+                if (!outputDirectory.mkdirs()) {
+                    throw Exception(
+                        "Unable to create output directory."
+                    )
+                }
+
+                val temporaryDirectory =
+                    File(
+                        cacheDir,
+                        "video_temp"
+                    )
+
+                if (temporaryDirectory.exists()) {
+                    temporaryDirectory.deleteRecursively()
+                }
+
+                if (!temporaryDirectory.mkdirs()) {
+                    throw Exception(
+                        "Unable to create temporary directory."
+                    )
+                }
+
+                val musicFile =
+                    copyAssetToCache(
+                        ASSET_MUSIC,
+                        "background_music.mp3"
+                    )
+
+                val total = lines.size
+
+                for (index in lines.indices) {
+
+                    if (!generating.get()) {
+                        throw InterruptedException(
+                            "Generation cancelled."
+                        )
+                    }
+
+                    val item =
+                        parseVerse(lines[index])
+
                     val number = index + 1
-                    runOnUiThread {
-                        progress.progress = ((index.toFloat() / verses.size) * 85f).roundToInt()
-                        status.text = "Generating $number/${verses.size}..."
+
+                    updateProgress(
+                        ((index.toFloat() / total.toFloat()) * 100f)
+                            .toInt()
+                    )
+
+                    setStatus(
+                        "Creating video $number of $total..."
+                    )
+
+                    val frameFile =
+                        File(
+                            temporaryDirectory,
+                            "frame_$number.png"
+                        )
+
+                    val videoFile =
+                        File(
+                            outputDirectory,
+                            "$number.mp4"
+                        )
+
+                    createFrame(
+                        item = item,
+                        output = frameFile
+                    )
+
+                    createVideo(
+                        frame = frameFile,
+                        music = musicFile,
+                        output = videoFile
+                    )
+
+                    if (!videoFile.exists() ||
+                        videoFile.length() <= 0L
+                    ) {
+
+                        throw Exception(
+                            "Video $number was not created."
+                        )
                     }
 
-                    val parsed = parseVerse(line)
-                    val png = File(work, "frame_$number.png")
-                    renderFrame(parsed.first, parsed.second, font, png)
+                    generatedVideos.add(videoFile)
 
-                    val out = File(work, "$number.mp4")
-                    createVideo(png, audio, out)
-                    if (!out.exists() || out.length() < 1024) {
-                        throw IllegalStateException("Video $number was not created.")
-                    }
-                    videos += out
+                    updateProgress(
+                        ((number.toFloat() / total.toFloat()) * 100f)
+                            .toInt()
+                    )
+
+                    setStatus(
+                        "Completed $number of $total"
+                    )
                 }
+
+                setStatus(
+                    "Creating ZIP file..."
+                )
+
+                val zipFile =
+                    File(
+                        cacheDir,
+                        "BibleVerseVideos.zip"
+                    )
+
+                if (zipFile.exists()) {
+                    zipFile.delete()
+                }
+
+                createZip(
+                    generatedVideos,
+                    zipFile
+                )
+
+                currentZipFile = zipFile
+
+                updateProgress(100)
+
+                setStatus(
+                    "Finished. ${generatedVideos.size} video(s) ready."
+                )
 
                 runOnUiThread {
-                    progress.progress = 90
-                    status.text = "Creating ZIP..."
+                    saveButton.isEnabled = true
                 }
 
-                val zip = File(work, "BibleVerseVideos.zip")
-                ZipOutputStream(FileOutputStream(zip)).use { zos ->
-                    videos.forEach { video ->
-                        zos.putNextEntry(ZipEntry(video.name))
-                        FileInputStream(video).use { inputStream -> inputStream.copyTo(zos) }
-                        zos.closeEntry()
-                    }
-                }
+            } catch (e: InterruptedException) {
 
-                generatedZip = zip
-                runOnUiThread {
-                    progress.progress = 100
-                    status.text = "Finished: ${videos.size} video(s). Tap SAVE ALL VIDEOS AS ZIP."
-                    saveButton.visibility = View.VISIBLE
-                    generateButton.isEnabled = true
-                    generating = false
-                }
+                setStatus(
+                    "Generation cancelled."
+                )
+
             } catch (e: Exception) {
+
+                showError(
+                    e.message ?: "Unknown generation error."
+                )
+
+            } finally {
+
+                generating.set(false)
+
                 runOnUiThread {
-                    status.text = "Error: ${e.message ?: "Unknown error"}"
                     generateButton.isEnabled = true
-                    generating = false
-                    progress.visibility = View.GONE
-                    toast(e.message ?: "Generation failed")
                 }
             }
-        }.start()
-    }
-
-    private fun createVideo(frame: File, audio: File, output: File) {
-        fun q(path: String): String = "'" + path.replace("'", "'\\''") + "'"
-
-        val command = buildString {
-            append("-y ")
-            append("-loop 1 -framerate $FPS -i ${q(frame.absolutePath)} ")
-            append("-stream_loop -1 -i ${q(audio.absolutePath)} ")
-            append("-map 0:v:0 -map 1:a:0 ")
-            append("-t $VIDEO_SECONDS ")
-            append("-vf \\"scale=$WIDTH:$HEIGHT,format=yuv420p\\" ")
-            append("-c:v libopenh264 -b:v 5M -r $FPS -pix_fmt yuv420p ")
-            append("-c:a aac -b:a 192k -ar 44100 -ac 2 ")
-            append("-movflags +faststart ")
-            append(q(output.absolutePath))
-        }
-
-        val session = FFmpegKit.execute(command)
-        if (!ReturnCode.isSuccess(session.returnCode)) {
-            val logs = session.allLogsAsString
-            throw IllegalStateException("FFmpeg failed: ${logs.takeLast(1200)}")
         }
     }
 
-    private fun parseVerse(line: String): Pair<String, String> {
-        val regex = Regex("\\s+[—–-]\\s+")
-        val match = regex.find(line)
-        return if (match != null) {
-            val verse = line.substring(0, match.range.first).trim()
-            val reference = line.substring(match.range.last + 1).trim()
-            verse to reference
-        } else {
-            line.trim() to ""
-        }
-    }
+    private data class VerseItem(
+        val verse: String,
+        val reference: String
+    )
 
-    private fun renderFrame(verse: String, reference: String, fontFile: File, output: File) {
-        val bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(android.graphics.Color.BLACK)
+    private fun parseVerse(
+        input: String
+    ): VerseItem {
 
-        val typeface = Typeface.createFromFile(fontFile)
+        val cleaned =
+            input.trim()
 
-        val headingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.YELLOW
-            textSize = 72f
-            typeface = typeface
-            textAlign = Paint.Align.CENTER
-        }
-        drawCenteredSingleLine(canvas, HEADING, WIDTH / 2f, HEADING_Y - headingPaint.ascent(), headingPaint)
+        val separators = listOf(
+            " — ",
+            " – ",
+            " - ",
+            "—",
+            "–"
+        )
 
-        var verseSize = 72f
-        var referenceSize = 54f
-        var layout = calculateLayout(verse, reference, typeface, verseSize, referenceSize)
-        while (layout.height > TEXT_HEIGHT && verseSize > 28f) {
-            verseSize -= 2f
-            referenceSize = max(40f, referenceSize - 1f)
-            layout = calculateLayout(verse, reference, typeface, verseSize, referenceSize)
-        }
+        for (separator in separators) {
 
-        // If the verse still cannot fit, keep reducing until it fits the 1320px block.
-        while (layout.height > TEXT_HEIGHT && verseSize > 18f) {
-            verseSize -= 1f
-            referenceSize = max(32f, referenceSize - 0.5f)
-            layout = calculateLayout(verse, reference, typeface, verseSize, referenceSize)
-        }
+            val position =
+                cleaned.lastIndexOf(separator)
 
-        if (layout.height > TEXT_HEIGHT) {
-            throw IllegalArgumentException("A verse is too long to fit inside the fixed 680 x 1320 text area even at minimum font size.")
-        }
+            if (position > 0 &&
+                position < cleaned.length - separator.length
+            ) {
 
-        var y = BLOCK_TOP + (TEXT_HEIGHT - layout.height) / 2f
+                val verse =
+                    cleaned.substring(
+                        0,
+                        position
+                    ).trim()
 
-        if (reference.isNotBlank()) {
-            val refPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.YELLOW
-                textSize = referenceSize
-                this.typeface = typeface
-                textAlign = Paint.Align.CENTER
+                val reference =
+                    cleaned.substring(
+                        position + separator.length
+                    ).trim()
+
+                if (verse.isNotBlank() &&
+                    reference.isNotBlank()
+                ) {
+
+                    return VerseItem(
+                        verse = verse,
+                        reference = reference
+                    )
+                }
             }
-            y = drawWrapped(canvas, layout.referenceLines, WIDTH / 2f, y, refPaint, referenceSize * 1.20f)
-            y += verseSize * 0.40f
         }
 
-        val versePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            textSize = verseSize
-            this.typeface = typeface
-            textAlign = Paint.Align.CENTER
-        }
-        drawWrapped(canvas, layout.verseLines, WIDTH / 2f, y, versePaint, verseSize * 1.20f)
+        return VerseItem(
+            verse = cleaned,
+            reference = ""
+        )
+    }
 
-        // Safety checks: no text is intentionally placed outside y=200..1720.
-        // The heading baseline starts at 200 and the content block ends at 1720.
-        FileOutputStream(output).use {
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+    private fun createFrame(
+        item: VerseItem,
+        output: File
+    ) {
+
+        val bitmap =
+            Bitmap.createBitmap(
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT,
+                Bitmap.Config.ARGB_8888
+            )
+
+        val canvas =
+            Canvas(bitmap)
+
+        canvas.drawColor(
+            BACKGROUND_COLOR
+        )
+
+        val typeface =
+            customTypeface
+                ?: Typeface.DEFAULT
+
+        val headingPaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG or
+                        Paint.SUBPIXEL_TEXT_FLAG
+            )
+
+        headingPaint.color =
+            HEADING_COLOR
+
+        headingPaint.textSize =
+            HEADING_FONT_SIZE
+
+        headingPaint.typeface =
+            Typeface.create(
+                typeface,
+                Typeface.BOLD
+            )
+
+        headingPaint.textAlign =
+            Paint.Align.CENTER
+
+        headingPaint.isDither = true
+
+        drawCenteredText(
+            canvas = canvas,
+            text = HEADING_TEXT,
+            paint = headingPaint,
+            centerX = VIDEO_WIDTH / 2f,
+            baselineY = 290f
+        )
+
+        if (item.reference.isNotBlank()) {
+
+            val referencePaint =
+                Paint(
+                    Paint.ANTI_ALIAS_FLAG or
+                            Paint.SUBPIXEL_TEXT_FLAG
+                )
+
+            referencePaint.color =
+                REFERENCE_COLOR
+
+            referencePaint.textSize =
+                REFERENCE_FONT_SIZE
+
+            referencePaint.typeface =
+                Typeface.create(
+                    typeface,
+                    Typeface.BOLD
+                )
+
+            referencePaint.textAlign =
+                Paint.Align.CENTER
+
+            referencePaint.isDither = true
+
+            drawCenteredText(
+                canvas = canvas,
+                text = item.reference,
+                paint = referencePaint,
+                centerX = VIDEO_WIDTH / 2f,
+                baselineY = 365f
+            )
         }
+
+        val versePaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG or
+                        Paint.SUBPIXEL_TEXT_FLAG
+            )
+
+        versePaint.color =
+            VERSE_COLOR
+
+        versePaint.typeface =
+            typeface
+
+        versePaint.textAlign =
+            Paint.Align.CENTER
+
+        versePaint.isDither = true
+
+        val availableWidth =
+            min(
+                MAX_TEXT_WIDTH,
+                VIDEO_WIDTH - TEXT_LEFT - TEXT_RIGHT
+            ).toFloat()
+
+        val result =
+            findBestTextLayout(
+                text = item.verse,
+                basePaint = versePaint,
+                availableWidth = availableWidth,
+                maxHeight = MAX_VERSE_HEIGHT.toFloat()
+            )
+
+        versePaint.textSize =
+            result.textSize
+
+        drawTextLines(
+            canvas = canvas,
+            lines = result.lines,
+            paint = versePaint,
+            centerX = VIDEO_WIDTH / 2f,
+            top = VERSE_AREA_TOP.toFloat(),
+            bottom = VERSE_AREA_BOTTOM.toFloat()
+        )
+
+        val stream =
+            FileOutputStream(output)
+
+        stream.use {
+            bitmap.compress(
+                Bitmap.CompressFormat.PNG,
+                100,
+                it
+            )
+        }
+
         bitmap.recycle()
     }
 
-    private data class Layout(
-        val referenceLines: List<String>,
-        val verseLines: List<String>,
-        val height: Float
+    private data class TextLayout(
+        val lines: List<String>,
+        val textSize: Float,
+        val lineHeight: Float
     )
 
-    private fun calculateLayout(
-        verse: String,
-        reference: String,
-        typeface: Typeface,
-        verseSize: Float,
-        referenceSize: Float
-    ): Layout {
-        val versePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = verseSize
-            this.typeface = typeface
-        }
-        val refPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = referenceSize
-            this.typeface = typeface
+    private fun findBestTextLayout(
+        text: String,
+        basePaint: Paint,
+        availableWidth: Float,
+        maxHeight: Float
+    ): TextLayout {
+
+        var fontSize =
+            MAX_VERSE_FONT_SIZE
+
+        while (
+            fontSize >= MIN_VERSE_FONT_SIZE
+        ) {
+
+            basePaint.textSize =
+                fontSize
+
+            val lines =
+                wrapText(
+                    text = text,
+                    paint = basePaint,
+                    maxWidth = availableWidth
+                )
+
+            val metrics =
+                basePaint.fontMetrics
+
+            val lineHeight =
+                (
+                    metrics.descent -
+                            metrics.ascent
+                    ) * 1.18f
+
+            val totalHeight =
+                lines.size * lineHeight
+
+            if (totalHeight <= maxHeight) {
+
+                return TextLayout(
+                    lines = lines,
+                    textSize = fontSize,
+                    lineHeight = lineHeight
+                )
+            }
+
+            fontSize -= 1f
         }
 
-        val verseLines = wrapText(verse, versePaint, TEXT_WIDTH)
-        val referenceLines = wrapText(reference, refPaint, TEXT_WIDTH)
+        basePaint.textSize =
+            MIN_VERSE_FONT_SIZE
 
-        val verseLineHeight = verseSize * 1.20f
-        val refLineHeight = referenceSize * 1.20f
-        val gap = if (referenceLines.isNotEmpty()) verseSize * 0.40f else 0f
-        val height = referenceLines.size * refLineHeight + gap + verseLines.size * verseLineHeight
-        return Layout(referenceLines, verseLines, height)
+        val finalLines =
+            wrapText(
+                text = text,
+                paint = basePaint,
+                maxWidth = availableWidth
+            )
+
+        val metrics =
+            basePaint.fontMetrics
+
+        val finalLineHeight =
+            (
+                metrics.descent -
+                        metrics.ascent
+                ) * 1.12f
+
+        return TextLayout(
+            lines = finalLines,
+            textSize = MIN_VERSE_FONT_SIZE,
+            lineHeight = finalLineHeight
+        )
     }
 
-    private fun wrapText(text: String, paint: Paint, maxWidth: Int): List<String> {
-        if (text.isBlank()) return emptyList()
-        val result = mutableListOf<String>()
-        val paragraphs = text.replace("\\n", "\n").split('\n')
+    private fun wrapText(
+        text: String,
+        paint: Paint,
+        maxWidth: Float
+    ): List<String> {
+
+        val paragraphs =
+            text.replace(
+                "\r",
+                ""
+            ).split("\n")
+
+        val result =
+            mutableListOf<String>()
+
         for (paragraph in paragraphs) {
-            val words = paragraph.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-            if (words.isEmpty()) continue
-            var line = ""
+
+            val words =
+                paragraph
+                    .trim()
+                    .split(
+                        Regex("\\s+")
+                    )
+                    .filter {
+                        it.isNotBlank()
+                    }
+
+            if (words.isEmpty()) {
+                result.add("")
+                continue
+            }
+
+            var current =
+                StringBuilder()
+
             for (word in words) {
-                val candidate = if (line.isEmpty()) word else "$line $word"
-                if (paint.measureText(candidate) <= maxWidth) {
-                    line = candidate
-                } else {
-                    if (line.isNotEmpty()) result += line
-                    if (paint.measureText(word) <= maxWidth) {
-                        line = word
+
+                val candidate =
+                    if (current.isEmpty()) {
+                        word
                     } else {
-                        var part = ""
-                        for (ch in word) {
-                            val c = part + ch
-                            if (paint.measureText(c) <= maxWidth) {
-                                part = c
-                            } else {
-                                if (part.isNotEmpty()) result += part
-                                part = ch.toString()
-                            }
-                        }
-                        line = part
+                        "${current} $word"
+                    }
+
+                if (
+                    paint.measureText(candidate)
+                        <= maxWidth
+                ) {
+
+                    if (current.isNotEmpty()) {
+                        current.append(" ")
+                    }
+
+                    current.append(word)
+
+                } else {
+
+                    if (current.isNotEmpty()) {
+
+                        result.add(
+                            current.toString()
+                        )
+
+                        current =
+                            StringBuilder()
+                    }
+
+                    if (
+                        paint.measureText(word)
+                            <= maxWidth
+                    ) {
+
+                        current.append(word)
+
+                    } else {
+
+                        splitLongWord(
+                            word,
+                            paint,
+                            maxWidth,
+                            result
+                        )
                     }
                 }
             }
-            if (line.isNotEmpty()) result += line
+
+            if (current.isNotEmpty()) {
+                result.add(
+                    current.toString()
+                )
+            }
         }
-        return result
+
+        return if (result.isEmpty()) {
+            listOf("")
+        } else {
+            result
+        }
     }
 
-    private fun drawCenteredSingleLine(canvas: Canvas, text: String, centerX: Float, baseline: Float, paint: Paint) {
-        canvas.drawText(text, centerX, baseline, paint)
+    private fun splitLongWord(
+        word: String,
+        paint: Paint,
+        maxWidth: Float,
+        output: MutableList<String>
+    ) {
+
+        var current =
+            StringBuilder()
+
+        for (character in word) {
+
+            val candidate =
+                current.toString() + character
+
+            if (
+                paint.measureText(candidate)
+                    <= maxWidth
+            ) {
+
+                current.append(character)
+
+            } else {
+
+                if (current.isNotEmpty()) {
+
+                    output.add(
+                        current.toString()
+                    )
+
+                    current =
+                        StringBuilder()
+                }
+
+                current.append(character)
+            }
+        }
+
+        if (current.isNotEmpty()) {
+
+            output.add(
+                current.toString()
+            )
+        }
     }
 
-    private fun drawWrapped(
+    private fun drawTextLines(
         canvas: Canvas,
         lines: List<String>,
-        centerX: Float,
-        startY: Float,
         paint: Paint,
-        lineHeight: Float
-    ): Float {
-        var y = startY
-        for (line in lines) {
-            canvas.drawText(line, centerX, y - paint.ascent(), paint)
-            y += lineHeight
+        centerX: Float,
+        top: Float,
+        bottom: Float
+    ) {
+
+        if (lines.isEmpty()) {
+            return
         }
-        return y
+
+        val metrics =
+            paint.fontMetrics
+
+        val lineHeight =
+            (
+                metrics.descent -
+                        metrics.ascent
+                ) * 1.18f
+
+        val totalHeight =
+            lines.size * lineHeight
+
+        val availableHeight =
+            bottom - top
+
+        val firstBaseline =
+            top +
+                    (
+                        availableHeight -
+                                totalHeight
+                        ) / 2f -
+                    metrics.ascent
+
+        var baseline =
+            firstBaseline
+
+        for (line in lines) {
+
+            canvas.drawText(
+                line,
+                centerX,
+                baseline,
+                paint
+            )
+
+            baseline += lineHeight
+        }
     }
 
-    private fun copyAsset(name: String, destination: File) {
-        assets.open(name).use { inputStream ->
-            FileOutputStream(destination).use { outputStream -> inputStream.copyTo(outputStream) }
+    private fun drawCenteredText(
+        canvas: Canvas,
+        text: String,
+        paint: Paint,
+        centerX: Float,
+        baselineY: Float
+    ) {
+
+        canvas.drawText(
+            text,
+            centerX,
+            baselineY,
+            paint
+        )
+    }
+
+    private fun createVideo(
+        frame: File,
+        music: File,
+        output: File
+    ) {
+
+        if (output.exists()) {
+            output.delete()
+        }
+
+        val framePath =
+            ffmpegPath(frame)
+
+        val musicPath =
+            ffmpegPath(music)
+
+        val outputPath =
+            ffmpegPath(output)
+
+        val command =
+            """
+            -y
+            -loop 1
+            -framerate $VIDEO_FPS
+            -i "$framePath"
+            -stream_loop -1
+            -i "$musicPath"
+            -map 0:v:0
+            -map 1:a:0
+            -t $VIDEO_DURATION_SECONDS
+            -vf "scale=$VIDEO_WIDTH:$VIDEO_HEIGHT:force_original_aspect_ratio=disable,format=yuv420p"
+            -c:v libopenh264
+            -b:v 5M
+            -r $VIDEO_FPS
+            -pix_fmt yuv420p
+            -c:a aac
+            -b:a 192k
+            -ar 44100
+            -ac 2
+            -af "volume=$MUSIC_VOLUME"
+            -movflags +faststart
+            "$outputPath"
+            """.trimIndent()
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+
+        val session =
+            FFmpegKit.execute(
+                command
+            )
+
+        val returnCode =
+            session.returnCode
+
+        if (!ReturnCode.isSuccess(returnCode)) {
+
+            val logs =
+                session.allLogsAsString
+
+            throw Exception(
+                "FFmpeg failed.\n\n$logs"
+            )
+        }
+
+        if (!output.exists()) {
+
+            throw Exception(
+                "FFmpeg completed but output file was not created."
+            )
+        }
+
+        if (output.length() < 1024L) {
+
+            throw Exception(
+                "Generated video file is invalid."
+            )
+        }
+    }
+
+    private fun createZip(
+        files: List<File>,
+        zipFile: File
+    ) {
+
+        ZipOutputStream(
+            BufferedOutputStream(
+                FileOutputStream(zipFile)
+            )
+        ).use { zip ->
+
+            val buffer =
+                ByteArray(64 * 1024)
+
+            for (file in files) {
+
+                if (!file.exists()) {
+                    continue
+                }
+
+                val entry =
+                    ZipEntry(file.name)
+
+                zip.putNextEntry(entry)
+
+                BufferedInputStream(
+                    FileInputStream(file)
+                ).use { input ->
+
+                    while (true) {
+
+                        val count =
+                            input.read(buffer)
+
+                        if (count <= 0) {
+                            break
+                        }
+
+                        zip.write(
+                            buffer,
+                            0,
+                            count
+                        )
+                    }
+                }
+
+                zip.closeEntry()
+            }
         }
     }
 
     private fun saveZip() {
-        val zip = generatedZip ?: run {
-            toast("Generate videos first.")
+
+        val zip =
+            currentZipFile
+
+        if (
+            zip == null ||
+            !zip.exists()
+        ) {
+
+            Toast.makeText(
+                this,
+                "Generate the videos first.",
+                Toast.LENGTH_LONG
+            ).show()
+
             return
         }
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/zip"
-            putExtra(Intent.EXTRA_TITLE, "BibleVerseVideos.zip")
-        }
-        startActivityForResult(intent, CREATE_ZIP_REQUEST)
+
+        val intent =
+            Intent(
+                Intent.ACTION_CREATE_DOCUMENT
+            ).apply {
+
+                addCategory(
+                    Intent.CATEGORY_OPENABLE
+                )
+
+                type =
+                    "application/zip"
+
+                putExtra(
+                    Intent.EXTRA_TITLE,
+                    "BibleVerseVideos.zip"
+                )
+            }
+
+        startActivityForResult(
+            intent,
+            CREATE_DOCUMENT_REQUEST
+        )
     }
 
-    @Deprecated("Deprecated in Android API, retained for broad device compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == CREATE_ZIP_REQUEST && resultCode == Activity.RESULT_OK && data?.data != null) {
-            val target: Uri = data.data!!
-            val zip = generatedZip ?: return
+    @Deprecated("Handled for compatibility with Android API levels.")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
+
+        if (
+            requestCode != CREATE_DOCUMENT_REQUEST ||
+            resultCode != Activity.RESULT_OK
+        ) {
+            return
+        }
+
+        val uri =
+            data?.data
+
+        if (uri == null) {
+
+            Toast.makeText(
+                this,
+                "Save location was not selected.",
+                Toast.LENGTH_LONG
+            ).show()
+
+            return
+        }
+
+        val zip =
+            currentZipFile
+
+        if (
+            zip == null ||
+            !zip.exists()
+        ) {
+
+            Toast.makeText(
+                this,
+                "ZIP file no longer exists.",
+                Toast.LENGTH_LONG
+            ).show()
+
+            return
+        }
+
+        executor.execute {
+
             try {
-                contentResolver.openOutputStream(target)?.use { output ->
-                    FileInputStream(zip).use { inputStream -> inputStream.copyTo(output) }
+
+                contentResolver.openOutputStream(
+                    uri
+                ).use { output ->
+
+                    if (output == null) {
+                        throw Exception(
+                            "Unable to open selected location."
+                        )
+                    }
+
+                    FileInputStream(
+                        zip
+                    ).use { input ->
+
+                        val buffer =
+                            ByteArray(64 * 1024)
+
+                        while (true) {
+
+                            val count =
+                                input.read(buffer)
+
+                            if (count <= 0) {
+                                break
+                            }
+
+                            output.write(
+                                buffer,
+                                0,
+                                count
+                            )
+                        }
+
+                        output.flush()
+                    }
                 }
-                toast("ZIP saved successfully.")
-                status.text = "ZIP saved successfully."
+
+                runOnUiThread {
+
+                    Toast.makeText(
+                        this,
+                        "BibleVerseVideos.zip saved successfully.",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    setStatus(
+                        "ZIP saved successfully."
+                    )
+                }
+
             } catch (e: Exception) {
-                toast("Could not save ZIP: ${e.message}")
+
+                showError(
+                    "Unable to save ZIP: ${e.message}"
+                )
             }
         }
     }
 
-    private fun toast(message: String) {
-        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+    private fun copyAssetToCache(
+        assetName: String,
+        outputName: String
+    ): File {
+
+        val output =
+            File(
+                cacheDir,
+                outputName
+            )
+
+        assets.open(
+            assetName
+        ).use { input ->
+
+            FileOutputStream(
+                output
+            ).use { outputStream ->
+
+                val buffer =
+                    ByteArray(64 * 1024)
+
+                while (true) {
+
+                    val count =
+                        input.read(buffer)
+
+                    if (count <= 0) {
+                        break
+                    }
+
+                    outputStream.write(
+                        buffer,
+                        0,
+                        count
+                    )
+                }
+
+                outputStream.flush()
+            }
+        }
+
+        return output
+    }
+
+    private fun loadFont(): Typeface? {
+
+        return try {
+
+            val fontFile =
+                File(
+                    cacheDir,
+                    ASSET_FONT
+                )
+
+            if (!fontFile.exists()) {
+
+                assets.open(
+                    ASSET_FONT
+                ).use { input ->
+
+                    FileOutputStream(
+                        fontFile
+                    ).use { output ->
+
+                        val buffer =
+                            ByteArray(16 * 1024)
+
+                        while (true) {
+
+                            val count =
+                                input.read(buffer)
+
+                            if (count <= 0) {
+                                break
+                            }
+
+                            output.write(
+                                buffer,
+                                0,
+                                count
+                            )
+                        }
+                    }
+                }
+            }
+
+            Typeface.createFromFile(
+                fontFile
+            )
+
+        } catch (_: Exception) {
+
+            Typeface.DEFAULT
+        }
+    }
+
+    private fun assetExists(
+        assetName: String
+    ): Boolean {
+
+        return try {
+
+            assets.open(
+                assetName
+            ).use {
+                true
+            }
+
+        } catch (_: Exception) {
+
+            false
+        }
+    }
+
+    private fun ffmpegPath(
+        file: File
+    ): String {
+
+        return file.absolutePath
+            .replace(
+                "\\",
+                "/"
+            )
+            .replace(
+                "'",
+                "'\\''"
+            )
+    }
+
+    private fun updateProgress(
+        progress: Int
+    ) {
+
+        val safeProgress =
+            progress.coerceIn(
+                0,
+                100
+            )
+
+        runOnUiThread {
+
+            progressBar.progress =
+                safeProgress
+        }
+    }
+
+    private fun setStatus(
+        message: String
+    ) {
+
+        runOnUiThread {
+
+            statusText.text =
+                message
+        }
+    }
+
+    private fun showError(
+        message: String
+    ) {
+
+        runOnUiThread {
+
+            statusText.text =
+                "Error: $message"
+
+            Toast.makeText(
+                this,
+                message,
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun dp(
+        value: Int
+    ): Int {
+
+        return (
+            value *
+                    resources.displayMetrics.density
+            ).toInt()
     }
 }
