@@ -4,40 +4,27 @@ plugins {
 
 android {
     namespace 'com.bibledailyshine.videogenerator'
-
-    compileSdk 36
+    compileSdk 35
 
     defaultConfig {
-        applicationId 'com.bibledailyshine.videogenerator'
-
-        minSdk 26
-        targetSdk 36
-
+        applicationId "com.bibledailyshine.videogenerator"
+        minSdk 24
+        targetSdk 35
         versionCode 1
         versionName "1.0"
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
     }
 
-    buildTypes {
-
-        debug {
-            minifyEnabled false
-        }
-
-        release {
-            minifyEnabled false
-            shrinkResources false
-
-            proguardFiles(
-                    getDefaultProguardFile(
-                            'proguard-android-optimize.txt'
-                    ),
-                    'proguard-rules.pro'
-            )
-        }
+    buildFeatures {
+        buildConfig true
     }
 }
 
 dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.1'
 
-    implementation 'androidx.core:core:1.17.0'
+    implementation 'dev.ffmpegkit-maintained:kokoro-android:0.1.0'
 }
