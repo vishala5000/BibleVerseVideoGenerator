@@ -4,17 +4,25 @@ plugins {
 
 android {
     namespace 'com.bibledailyshine.videogenerator'
+
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.bibledailyshine.videogenerator"
+        applicationId 'com.bibledailyshine.videogenerator'
+
         minSdk 26
         targetSdk 36
+
         versionCode 1
         versionName "1.0"
     }
 
     buildTypes {
+
+        debug {
+            minifyEnabled false
+        }
+
         release {
             minifyEnabled false
             shrinkResources false
@@ -30,5 +38,6 @@ android {
 }
 
 dependencies {
+
     implementation 'androidx.core:core:1.17.0'
 }
