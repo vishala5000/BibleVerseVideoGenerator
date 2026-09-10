@@ -1,3 +1,4 @@
+```gradle
 plugins {
     id 'com.android.application'
 }
@@ -7,24 +8,46 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId "com.bibledailyshine.videogenerator"
+        applicationId 'com.bibledailyshine.videogenerator'
         minSdk 24
         targetSdk 35
         versionCode 1
-        versionName "1.0"
+        versionName '1.0'
 
         ndk {
-            abiFilters "arm64-v8a"
+            abiFilters 'arm64-v8a'
         }
     }
 
-    buildFeatures {
-        buildConfig true
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles(
+                    getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro'
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            excludes += [
+                    'META-INF/DEPENDENCIES',
+                    'META-INF/LICENSE',
+                    'META-INF/LICENSE.txt',
+                    'META-INF/NOTICE',
+                    'META-INF/NOTICE.txt'
+            ]
+        }
     }
 }
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.1'
-
-    implementation 'dev.ffmpegkit-maintained:kokoro-android:0.1.0'
 }
+```
