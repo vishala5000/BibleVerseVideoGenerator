@@ -7,629 +7,597 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.media.MediaCodec;
-import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.view.Surface;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * FAST BULK BIBLE VERSE VIDEO GENERATOR
- *
- * Output:
- * 1080 x 1920
- * H.264 / AVC
- * 30 FPS
- * exactly 8 seconds
- *
- * Layout:
- * Top 200 px = no text
- * Bottom 200 px = no text
- * "Bible Verse" = yellow
- * Verse = white
- * Black background
- *
- * Audio:
- * bg.mp3 -> AAC only ONCE
- * Cached and reused for every video
- *
- * Assets:
- * assets/font.ttf
- * assets/bg.mp3
- */
 public final class VideoGenerator {
 
     private VideoGenerator() {
     }
 
     // ============================================================
-    // VIDEO
+    // VIDEO SETTINGS
     // ============================================================
 
-    public static final int WIDTH = 1080;
-    public static final int HEIGHT = 1920;
+    private static final int VIDEO_WIDTH = 1080;
+    private static final int VIDEO_HEIGHT = 1920;
 
-    public static final int FPS = 30;
+    private static final int FPS = 30;
+    private static final int TOTAL_FRAMES = 240; // 8 seconds
 
-    public static final int DURATION_SECONDS = 8;
+    private static final long FRAME_DURATION_US = 1_000_000L / FPS;
 
-    public static final int TOTAL_FRAMES =
-            FPS * DURATION_SECONDS;
+    private static final int VIDEO_BITRATE = 5_000_000;
 
-    public static final long DURATION_US =
-            8_000_000L;
+    private static final String MIME_VIDEO = "video/avc";
+    private static final String MIME_AUDIO = "audio/mp4a-latm";
+
+    private static final String HEADING = "Bible Verse";
+
+    private static final int SAFE_TOP = 200;
+    private static final int SAFE_BOTTOM = 200;
+
+    private static final int SIDE_MARGIN = 100;
+
+    private static final int HEADING_COLOR = Color.YELLOW;
+    private static final int VERSE_COLOR = Color.WHITE;
+
+    private static final int HEADING_SIZE = 100;
+
+    private static final float HEADING_GAP = 70f;
 
     /*
-     * 5 Mbps is plenty for a black background with text and is
-     * faster/smaller than the previous 8 Mbps setting.
+     * Change this version if you replace bg.mp3 inside a new APK.
+     * This prevents an old cached AAC file from being reused.
      */
-    private static final int VIDEO_BITRATE =
-            5_000_000;
-
-    private static final int I_FRAME_INTERVAL =
-            1;
-
-    private static final String VIDEO_MIME =
-            "video/avc";
+    private static final String AUDIO_CACHE_NAME =
+            "bible_bg_audio_8sec_v2.m4a";
 
     // ============================================================
-    // SAFE AREA
+    // PUBLIC API
     // ============================================================
 
-    private static final float TOP_SAFE =
-            200.0f;
-
-    private static final float BOTTOM_SAFE =
-            200.0f;
-
-    private static final float TEXT_WIDTH =
-            800.0f;
-
-    // ============================================================
-    // HEADING
-    // ============================================================
-
-    private static final String HEADING =
-            "Bible Verse";
-
-    private static final float HEADING_SIZE =
-            88.0f;
-
-    private static final int HEADING_COLOR =
-            Color.YELLOW;
-
-    // ============================================================
-    // VERSE
-    // ============================================================
-
-    private static final int VERSE_COLOR =
-            Color.WHITE;
-
-    private static final float MAX_VERSE_SIZE =
-            72.0f;
-
-    private static final float MIN_VERSE_SIZE =
-            22.0f;
-
-    private static final float LINE_SPACING =
-            1.25f;
-
-    private static final float HEADING_VERSE_GAP =
-            60.0f;
-
-    // ============================================================
-    // AUDIO
-    // ============================================================
-
-    private static final String AUDIO_MIME =
-            "audio/mp4a-latm";
-
-    private static final int AUDIO_SAMPLE_RATE =
-            44100;
-
-    private static final int AUDIO_CHANNELS =
-            2;
-
-    private static final int AUDIO_BITRATE =
-            128000;
-
-    /*
-     * This file is created once in cache and reused for every
-     * generated video.
+    /**
+     * Generates one 1080x1920, 8-second MP4.
+     *
+     * MainActivity can continue using:
+     *
+     * VideoGenerator.generate(context, verse, outputFile);
      */
-    private static final String CACHED_AUDIO =
-            "bible_bg_8sec_audio.m4a";
-
-    // ============================================================
-    // PUBLIC METHOD
-    // ============================================================
-
     public static void generate(
             Context context,
             String verse,
-            File output
+            File outputFile
     ) throws Exception {
 
         if (context == null) {
-            throw new IllegalArgumentException(
-                    "Context is null."
-            );
+            throw new IllegalArgumentException("Context is null");
         }
 
-        if (verse == null) {
-            throw new IllegalArgumentException(
-                    "Verse is null."
-            );
+        if (verse == null || verse.trim().isEmpty()) {
+            throw new IllegalArgumentException("Verse is empty");
         }
 
-        verse = verse.trim();
-
-        if (verse.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "Verse is empty."
-            );
+        if (outputFile == null) {
+            throw new IllegalArgumentException("Output file is null");
         }
 
-        if (output == null) {
-            throw new IllegalArgumentException(
-                    "Output file is null."
-            );
-        }
+        File parent = outputFile.getParentFile();
 
-        File parent =
-                output.getParentFile();
-
-        if (parent != null &&
-                !parent.exists()) {
-
-            if (!parent.mkdirs() &&
-                    !parent.exists()) {
-
-                throw new Exception(
-                        "Unable to create output directory."
+        if (parent != null && !parent.exists()) {
+            if (!parent.mkdirs() && !parent.exists()) {
+                throw new IOException(
+                        "Cannot create output directory: " +
+                                parent.getAbsolutePath()
                 );
             }
         }
 
-        File videoFile =
-                new File(
-                        parent,
-                        output.getName()
-                                + ".video.tmp.mp4"
-                );
-
-        deleteQuietly(videoFile);
-
-        try {
-
-            // ====================================================
-            // STEP 1
-            // Render and encode ONLY the current verse.
-            // ====================================================
-
-            createVideo(
-                    context,
-                    verse,
-                    videoFile
-            );
-
-            // ====================================================
-            // STEP 2
-            // Get cached 8-second background audio.
-            //
-            // This is the important bulk optimization:
-            // bg.mp3 is NOT decoded for every verse.
-            // ====================================================
-
-            File audioFile =
-                    getCachedAudio(
-                            context
-                    );
-
-            // ====================================================
-            // STEP 3
-            // Fast final mux.
-            // ====================================================
-
-            muxVideoAndAudio(
-                    videoFile,
-                    audioFile,
-                    output
-            );
-
-        } finally {
-
-            deleteQuietly(
-                    videoFile
-            );
-        }
-    }
-
-    // ============================================================
-    // CREATE VIDEO
-    // ============================================================
-
-    private static void createVideo(
-            Context context,
-            String verse,
-            File output
-    ) throws Exception {
-
-        if (output.exists()) {
-            deleteQuietly(output);
+        if (outputFile.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            outputFile.delete();
         }
 
         /*
-         * --------------------------------------------------------
-         * Create the final text bitmap ONCE.
-         * --------------------------------------------------------
+         * Create/cache AAC only once.
          *
-         * The old approach performed Canvas text drawing for
-         * every video frame.
-         *
-         * This version draws the complete 1080x1920 image once.
+         * For bulk generation all subsequent videos reuse this file.
          */
-        Bitmap bitmap =
-                createVerseBitmap(
-                        context,
-                        verse
-                );
+        File audioFile = getCachedAudio(context);
 
-        MediaFormat format =
-                MediaFormat.createVideoFormat(
-                        VIDEO_MIME,
-                        WIDTH,
-                        HEIGHT
-                );
-
-        format.setInteger(
-                MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities
-                        .COLOR_FormatSurface
+        /*
+         * Create final MP4 directly.
+         *
+         * There is NO temporary video-only MP4.
+         */
+        generateVideoWithAudio(
+                context,
+                verse.trim(),
+                audioFile,
+                outputFile
         );
+    }
 
-        format.setInteger(
-                MediaFormat.KEY_BIT_RATE,
-                VIDEO_BITRATE
-        );
+    // ============================================================
+    // MAIN VIDEO GENERATION
+    // ============================================================
 
-        format.setInteger(
-                MediaFormat.KEY_FRAME_RATE,
-                FPS
-        );
+    private static void generateVideoWithAudio(
+            Context context,
+            String verse,
+            File audioFile,
+            File outputFile
+    ) throws Exception {
 
-        format.setInteger(
-                MediaFormat.KEY_I_FRAME_INTERVAL,
-                I_FRAME_INTERVAL
-        );
+        Bitmap textBitmap = null;
+        MediaCodec encoder = null;
+        Surface inputSurface = null;
 
-        MediaCodec encoder =
-                MediaCodec.createEncoderByType(
-                        VIDEO_MIME
-                );
-
-        Surface surface = null;
-
+        MediaExtractor audioExtractor = null;
         MediaMuxer muxer = null;
 
-        boolean encoderStarted = false;
         boolean muxerStarted = false;
+        boolean videoFormatReceived = false;
+        boolean videoSampleWritten = false;
 
-        int videoTrack = -1;
-
-        MediaCodec.BufferInfo info =
-                new MediaCodec.BufferInfo();
+        int videoTrackIndex = -1;
+        int audioTrackIndex = -1;
 
         try {
 
+            // ----------------------------------------------------
+            // Render text ONCE.
+            // ----------------------------------------------------
+
+            textBitmap = createTextBitmap(context, verse);
+
+            // ----------------------------------------------------
+            // H.264 encoder
+            // ----------------------------------------------------
+
+            MediaFormat videoFormat =
+                    MediaFormat.createVideoFormat(
+                            MIME_VIDEO,
+                            VIDEO_WIDTH,
+                            VIDEO_HEIGHT
+                    );
+
+            videoFormat.setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfoCompat.COLOR_FORMAT_SURFACE
+            );
+
+            videoFormat.setInteger(
+                    MediaFormat.KEY_BIT_RATE,
+                    VIDEO_BITRATE
+            );
+
+            videoFormat.setInteger(
+                    MediaFormat.KEY_FRAME_RATE,
+                    FPS
+            );
+
+            videoFormat.setInteger(
+                    MediaFormat.KEY_I_FRAME_INTERVAL,
+                    1
+            );
+
+            /*
+             * Some Android encoders accept these parameters,
+             * some ignore them.
+             */
+            try {
+                videoFormat.setInteger(
+                        MediaFormat.KEY_PROFILE,
+                        MediaCodecInfoCompat.AVC_PROFILE_BASELINE
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                videoFormat.setInteger(
+                        MediaFormat.KEY_LEVEL,
+                        MediaCodecInfoCompat.AVC_LEVEL_31
+                );
+            } catch (Exception ignored) {
+            }
+
+            encoder = MediaCodec.createEncoderByType(MIME_VIDEO);
+
             encoder.configure(
-                    format,
+                    videoFormat,
                     null,
                     null,
                     MediaCodec.CONFIGURE_FLAG_ENCODE
             );
 
-            surface =
-                    encoder.createInputSurface();
-
-            if (surface == null) {
-
-                throw new Exception(
-                        "Unable to create encoder surface."
-                );
-            }
-
-            muxer =
-                    new MediaMuxer(
-                            output.getAbsolutePath(),
-                            MediaMuxer.OutputFormat
-                                    .MUXER_OUTPUT_MPEG_4
-                    );
+            inputSurface = encoder.createInputSurface();
 
             encoder.start();
 
-            encoderStarted = true;
+            // ----------------------------------------------------
+            // Open cached AAC audio
+            // ----------------------------------------------------
 
-            /*
-             * ----------------------------------------------------
-             * Submit exactly 240 frames.
-             * ----------------------------------------------------
-             *
-             * The bitmap itself is already prepared, so the
-             * expensive text layout/drawing is NOT repeated.
-             */
-            for (int frame = 0;
-                 frame < TOTAL_FRAMES;
-                 frame++) {
+            audioExtractor = new MediaExtractor();
+            audioExtractor.setDataSource(audioFile.getAbsolutePath());
 
-                Canvas canvas = null;
+            int audioSourceTrack = findAudioTrack(audioExtractor);
 
-                try {
+            if (audioSourceTrack < 0) {
+                throw new IOException(
+                        "Audio track missing from cached AAC file"
+                );
+            }
 
-                    canvas =
-                            surface.lockCanvas(
-                                    null
-                            );
+            audioExtractor.selectTrack(audioSourceTrack);
 
-                    if (canvas == null) {
+            MediaFormat sourceAudioFormat =
+                    audioExtractor.getTrackFormat(audioSourceTrack);
 
-                        throw new Exception(
-                                "Unable to lock encoder surface."
-                        );
-                    }
+            // ----------------------------------------------------
+            // Final MP4 muxer
+            // ----------------------------------------------------
 
-                    /*
-                     * Copy the already-rendered bitmap.
-                     */
-                    canvas.drawBitmap(
-                            bitmap,
-                            0,
-                            0,
-                            null
-                    );
+            muxer = new MediaMuxer(
+                    outputFile.getAbsolutePath(),
+                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            );
 
-                } finally {
+            // ----------------------------------------------------
+            // Render 240 frames
+            // ----------------------------------------------------
 
-                    if (canvas != null) {
+            for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
 
-                        surface.unlockCanvasAndPost(
-                                canvas
-                        );
-                    }
-                }
+                drawBitmapToSurface(
+                        inputSurface,
+                        textBitmap
+                );
 
                 /*
-                 * Drain available encoded data.
+                 * Drain encoder.
+                 *
+                 * The first calls are important because the encoder
+                 * will eventually send INFO_OUTPUT_FORMAT_CHANGED.
+                 *
+                 * At that moment we add BOTH tracks and start muxer.
                  */
                 while (true) {
 
-                    int index =
+                    MediaCodec.BufferInfo bufferInfo =
+                            new MediaCodec.BufferInfo();
+
+                    int outputIndex =
                             encoder.dequeueOutputBuffer(
-                                    info,
-                                    0
+                                    bufferInfo,
+                                    frame == 0 ? 10_000 : 0
                             );
 
-                    if (index ==
+                    if (outputIndex ==
                             MediaCodec.INFO_TRY_AGAIN_LATER) {
 
                         break;
                     }
 
-                    if (index ==
+                    if (outputIndex ==
                             MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
 
-                        if (!muxerStarted) {
+                        if (videoFormatReceived) {
+                            throw new IllegalStateException(
+                                    "Video output format changed twice"
+                            );
+                        }
 
-                            MediaFormat outputFormat =
-                                    encoder.getOutputFormat();
+                        MediaFormat actualVideoFormat =
+                                encoder.getOutputFormat();
 
-                            videoTrack =
-                                    muxer.addTrack(
-                                            outputFormat
+                        if (!MIME_VIDEO.equals(
+                                actualVideoFormat.getString(
+                                        MediaFormat.KEY_MIME
+                                )
+                        )) {
+                            throw new IOException(
+                                    "Encoder returned invalid video MIME: " +
+                                            actualVideoFormat
+                        );
+                        }
+
+                        videoTrackIndex =
+                                muxer.addTrack(actualVideoFormat);
+
+                        /*
+                         * Add the cached AAC track BEFORE starting muxer.
+                         */
+                        MediaFormat audioFormat =
+                                audioExtractor.getTrackFormat(
+                                        audioSourceTrack
+                                );
+
+                        audioTrackIndex =
+                                muxer.addTrack(audioFormat);
+
+                        muxer.start();
+
+                        muxerStarted = true;
+                        videoFormatReceived = true;
+
+                        continue;
+                    }
+
+                    if (outputIndex >= 0) {
+
+                        ByteBuffer encodedBuffer =
+                                encoder.getOutputBuffer(outputIndex);
+
+                        if (encodedBuffer != null &&
+                                bufferInfo.size > 0 &&
+                                muxerStarted) {
+
+                            if ((bufferInfo.flags &
+                                    MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+
+                                encodedBuffer.position(
+                                        bufferInfo.offset
+                                );
+
+                                encodedBuffer.limit(
+                                        bufferInfo.offset +
+                                                bufferInfo.size
+                                );
+
+                                /*
+                                 * Safety: only write valid video samples.
+                                 */
+                                if (bufferInfo.presentationTimeUs
+                                        < 8_000_000L) {
+
+                                    muxer.writeSampleData(
+                                            videoTrackIndex,
+                                            encodedBuffer,
+                                            bufferInfo
                                     );
 
-                            muxer.start();
-
-                            muxerStarted = true;
+                                    videoSampleWritten = true;
+                                }
+                            }
                         }
 
-                        continue;
-                    }
-
-                    if (index < 0) {
-                        continue;
-                    }
-
-                    ByteBuffer encoded =
-                            encoder.getOutputBuffer(
-                                    index
-                            );
-
-                    if (encoded != null &&
-                            info.size > 0 &&
-                            muxerStarted &&
-                            (info.flags &
-                                    MediaCodec
-                                            .BUFFER_FLAG_CODEC_CONFIG)
-                                    == 0) {
-
-                        encoded.position(
-                                info.offset
+                        encoder.releaseOutputBuffer(
+                                outputIndex,
+                                false
                         );
 
-                        encoded.limit(
-                                info.offset
-                                        + info.size
-                        );
+                        if ((bufferInfo.flags &
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
 
-                        if (info.presentationTimeUs >=
-                                0 &&
-                                info.presentationTimeUs <
-                                        DURATION_US) {
-
-                            muxer.writeSampleData(
-                                    videoTrack,
-                                    encoded,
-                                    info
-                            );
+                            break;
                         }
-                    }
 
-                    boolean eos =
-                            (info.flags &
-                                    MediaCodec
-                                            .BUFFER_FLAG_END_OF_STREAM)
-                                    != 0;
+                    } else {
 
-                    encoder.releaseOutputBuffer(
-                            index,
-                            false
-                    );
-
-                    if (eos) {
+                        /*
+                         * Unexpected negative result.
+                         * Just continue.
+                         */
                         break;
                     }
                 }
             }
 
-            /*
-             * No more frames.
-             */
+            // ----------------------------------------------------
+            // Tell Surface encoder that input is finished.
+            // ----------------------------------------------------
+
             encoder.signalEndOfInputStream();
 
-            /*
-             * Drain until EOS.
-             */
-            boolean videoEos = false;
+            // ----------------------------------------------------
+            // Drain remaining video until EOS.
+            // ----------------------------------------------------
 
-            while (!videoEos) {
+            boolean videoEOS = false;
 
-                int index =
+            long drainStart = System.currentTimeMillis();
+
+            while (!videoEOS) {
+
+                MediaCodec.BufferInfo bufferInfo =
+                        new MediaCodec.BufferInfo();
+
+                int outputIndex =
                         encoder.dequeueOutputBuffer(
-                                info,
-                                10_000
+                                bufferInfo,
+                                20_000
                         );
 
-                if (index ==
+                if (outputIndex ==
                         MediaCodec.INFO_TRY_AGAIN_LATER) {
+
+                    /*
+                     * Prevent an endless wait if an encoder behaves badly.
+                     */
+                    if (System.currentTimeMillis() - drainStart > 15_000) {
+                        throw new IOException(
+                                "H.264 encoder timed out while finishing"
+                        );
+                    }
 
                     continue;
                 }
 
-                if (index ==
+                if (outputIndex ==
                         MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
 
-                    if (!muxerStarted) {
+                    if (!videoFormatReceived) {
 
-                        MediaFormat outputFormat =
+                        MediaFormat actualVideoFormat =
                                 encoder.getOutputFormat();
 
-                        videoTrack =
-                                muxer.addTrack(
-                                        outputFormat
+                        videoTrackIndex =
+                                muxer.addTrack(actualVideoFormat);
+
+                        MediaFormat audioFormat =
+                                audioExtractor.getTrackFormat(
+                                        audioSourceTrack
                                 );
+
+                        audioTrackIndex =
+                                muxer.addTrack(audioFormat);
 
                         muxer.start();
 
                         muxerStarted = true;
+                        videoFormatReceived = true;
                     }
 
                     continue;
                 }
 
-                if (index < 0) {
-                    continue;
-                }
+                if (outputIndex >= 0) {
 
-                ByteBuffer encoded =
-                        encoder.getOutputBuffer(
-                                index
-                        );
+                    ByteBuffer encodedBuffer =
+                            encoder.getOutputBuffer(outputIndex);
 
-                if (encoded != null &&
-                        info.size > 0 &&
-                        muxerStarted &&
-                        (info.flags &
-                                MediaCodec
-                                        .BUFFER_FLAG_CODEC_CONFIG)
-                                == 0) {
+                    if (encodedBuffer != null &&
+                            bufferInfo.size > 0 &&
+                            muxerStarted) {
 
-                    encoded.position(
-                            info.offset
-                    );
+                        if ((bufferInfo.flags &
+                                MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
 
-                    encoded.limit(
-                            info.offset
-                                    + info.size
-                    );
+                            encodedBuffer.position(
+                                    bufferInfo.offset
+                            );
 
-                    if (info.presentationTimeUs >=
-                            0 &&
-                            info.presentationTimeUs <
-                                    DURATION_US) {
+                            encodedBuffer.limit(
+                                    bufferInfo.offset +
+                                            bufferInfo.size
+                            );
 
-                        muxer.writeSampleData(
-                                videoTrack,
-                                encoded,
-                                info
-                        );
+                            if (bufferInfo.presentationTimeUs
+                                    < 8_000_000L) {
+
+                                muxer.writeSampleData(
+                                        videoTrackIndex,
+                                        encodedBuffer,
+                                        bufferInfo
+                                );
+
+                                videoSampleWritten = true;
+                            }
+                        }
                     }
+
+                    if ((bufferInfo.flags &
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+
+                        videoEOS = true;
+                    }
+
+                    encoder.releaseOutputBuffer(
+                            outputIndex,
+                            false
+                    );
+
+                } else {
+
+                    /*
+                     * Other INFO_* values.
+                     */
                 }
+            }
 
-                if ((info.flags &
-                        MediaCodec
-                                .BUFFER_FLAG_END_OF_STREAM)
-                        != 0) {
+            // ----------------------------------------------------
+            // IMPORTANT VALIDATION
+            // ----------------------------------------------------
 
-                    videoEos = true;
-                }
-
-                encoder.releaseOutputBuffer(
-                        index,
-                        false
+            if (!videoFormatReceived) {
+                throw new IOException(
+                        "H.264 encoder never produced a video output format"
                 );
             }
 
-        } finally {
-
-            if (bitmap != null &&
-                    !bitmap.isRecycled()) {
-
-                bitmap.recycle();
+            if (!videoSampleWritten) {
+                throw new IOException(
+                        "H.264 encoder produced no video samples"
+                );
             }
 
-            if (encoderStarted) {
+            if (!muxerStarted) {
+                throw new IOException(
+                        "MediaMuxer was never started"
+                );
+            }
 
+            // ----------------------------------------------------
+            // Write cached AAC samples.
+            //
+            // Audio is exactly 8 seconds.
+            // ----------------------------------------------------
+
+            writeAudioSamples(
+                    audioExtractor,
+                    audioTrackIndex,
+                    muxer
+            );
+
+        } finally {
+
+            // ----------------------------------------------------
+            // Release encoder
+            // ----------------------------------------------------
+
+            if (encoder != null) {
                 try {
                     encoder.stop();
                 } catch (Exception ignored) {
                 }
-            }
-
-            try {
-                encoder.release();
-            } catch (Exception ignored) {
-            }
-
-            if (surface != null) {
 
                 try {
-                    surface.release();
+                    encoder.release();
                 } catch (Exception ignored) {
                 }
             }
 
+            // ----------------------------------------------------
+            // Release Surface
+            // ----------------------------------------------------
+
+            if (inputSurface != null) {
+                try {
+                    inputSurface.release();
+                } catch (Exception ignored) {
+                }
+            }
+
+            // ----------------------------------------------------
+            // Release extractor
+            // ----------------------------------------------------
+
+            if (audioExtractor != null) {
+                try {
+                    audioExtractor.release();
+                } catch (Exception ignored) {
+                }
+            }
+
+            // ----------------------------------------------------
+            // Stop/release muxer
+            // ----------------------------------------------------
+
             if (muxer != null) {
 
                 if (muxerStarted) {
-
                     try {
                         muxer.stop();
                     } catch (Exception ignored) {
@@ -641,207 +609,238 @@ public final class VideoGenerator {
                 } catch (Exception ignored) {
                 }
             }
+
+            // ----------------------------------------------------
+            // Bitmap
+            // ----------------------------------------------------
+
+            if (textBitmap != null &&
+                    !textBitmap.isRecycled()) {
+
+                textBitmap.recycle();
+            }
+        }
+
+        // --------------------------------------------------------
+        // Final file validation
+        // --------------------------------------------------------
+
+        if (!outputFile.exists() ||
+                outputFile.length() < 10_000) {
+
+            throw new IOException(
+                    "Video generation failed. Output MP4 is missing or empty: " +
+                            outputFile.getAbsolutePath()
+            );
         }
     }
 
     // ============================================================
-    // CREATE SINGLE VERSE BITMAP
+    // DRAW BITMAP TO MEDIACODEC SURFACE
     // ============================================================
 
-    private static Bitmap createVerseBitmap(
+    private static void drawBitmapToSurface(
+            Surface surface,
+            Bitmap bitmap
+    ) throws Exception {
+
+        Canvas canvas = null;
+
+        try {
+
+            canvas = surface.lockCanvas(null);
+
+            if (canvas == null) {
+                throw new IOException(
+                        "MediaCodec input surface returned null Canvas"
+                );
+            }
+
+            /*
+             * Black background.
+             */
+            canvas.drawColor(Color.BLACK);
+
+            /*
+             * Bitmap is already 1080x1920, so draw directly.
+             */
+            Paint paint = new Paint(
+                    Paint.ANTI_ALIAS_FLAG |
+                            Paint.FILTER_BITMAP_FLAG
+            );
+
+            canvas.drawBitmap(
+                    bitmap,
+                    0f,
+                    0f,
+                    paint
+            );
+
+        } finally {
+
+            if (canvas != null) {
+                surface.unlockCanvasAndPost(canvas);
+            }
+        }
+    }
+
+    // ============================================================
+    // CREATE TEXT BITMAP
+    // ============================================================
+
+    private static Bitmap createTextBitmap(
             Context context,
             String verse
     ) throws Exception {
 
-        Bitmap bitmap =
-                Bitmap.createBitmap(
-                        WIDTH,
-                        HEIGHT,
-                        Bitmap.Config.ARGB_8888
-                );
-
-        Canvas canvas =
-                new Canvas(bitmap);
-
-        /*
-         * Black background.
-         */
-        canvas.drawColor(
-                Color.BLACK
+        Bitmap bitmap = Bitmap.createBitmap(
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT,
+                Bitmap.Config.ARGB_8888
         );
 
-        Typeface typeface =
-                loadTypeface(context);
+        Canvas canvas = new Canvas(bitmap);
 
-        Paint headingPaint =
-                new Paint(
-                        Paint.ANTI_ALIAS_FLAG |
+        canvas.drawColor(Color.BLACK);
+
+        Typeface typeface;
+
+        try {
+            typeface = Typeface.createFromAsset(
+                    context.getAssets(),
+                    "font.ttf"
+            );
+        } catch (Exception e) {
+
+            /*
+             * Fallback so video generation does not completely fail
+             * if font.ttf is accidentally missing.
+             */
+            typeface = Typeface.create(
+                    Typeface.DEFAULT,
+                    Typeface.NORMAL
+            );
+        }
+
+        // --------------------------------------------------------
+        // Heading
+        // --------------------------------------------------------
+
+        Paint headingPaint = new Paint(
+                Paint.ANTI_ALIAS_FLAG |
                         Paint.SUBPIXEL_TEXT_FLAG
-                );
-
-        Paint versePaint =
-                new Paint(
-                        Paint.ANTI_ALIAS_FLAG |
-                        Paint.SUBPIXEL_TEXT_FLAG
-                );
-
-        headingPaint.setTypeface(
-                typeface
         );
 
-        versePaint.setTypeface(
-                typeface
-        );
-
-        headingPaint.setColor(
-                HEADING_COLOR
-        );
-
-        versePaint.setColor(
-                VERSE_COLOR
-        );
-
-        headingPaint.setTextAlign(
-                Paint.Align.CENTER
-        );
-
-        versePaint.setTextAlign(
-                Paint.Align.CENTER
-        );
-
-        // ========================================================
-        // HEADING
-        // ========================================================
-
-        headingPaint.setTextSize(
-                HEADING_SIZE
-        );
+        headingPaint.setTypeface(typeface);
+        headingPaint.setColor(HEADING_COLOR);
+        headingPaint.setTextAlign(Paint.Align.CENTER);
+        headingPaint.setTextSize(HEADING_SIZE);
 
         Paint.FontMetrics headingMetrics =
                 headingPaint.getFontMetrics();
 
+        float headingHeight =
+                headingMetrics.bottom -
+                        headingMetrics.top;
+
         /*
-         * Leave a 20px additional margin inside the 200px
-         * protected area.
+         * Heading is inside top safe area.
          */
         float headingBaseline =
-                TOP_SAFE
-                        - headingMetrics.top
-                        + 20.0f;
-
-        float headingBottom =
-                headingBaseline
-                        + headingMetrics.bottom;
+                SAFE_TOP -
+                        headingMetrics.top;
 
         canvas.drawText(
                 HEADING,
-                WIDTH / 2.0f,
+                VIDEO_WIDTH / 2f,
                 headingBaseline,
                 headingPaint
         );
 
-        // ========================================================
-        // VERSE AREA
-        // ========================================================
-
         float verseTop =
-                headingBottom
-                        + HEADING_VERSE_GAP;
+                headingBaseline +
+                        headingMetrics.bottom +
+                        HEADING_GAP;
 
-        float verseBottom =
-                HEIGHT
-                        - BOTTOM_SAFE;
+        // --------------------------------------------------------
+        // Verse
+        // --------------------------------------------------------
 
-        float availableHeight =
-                verseBottom
-                        - verseTop;
-
-        if (availableHeight <= 0) {
-
-            throw new Exception(
-                    "Invalid verse safe area."
-            );
-        }
-
-        TextLayoutData layout =
-                createTextLayout(
-                        versePaint,
-                        verse,
-                        TEXT_WIDTH,
-                        availableHeight
-                );
-
-        versePaint.setTextSize(
-                layout.textSize
+        Paint versePaint = new Paint(
+                Paint.ANTI_ALIAS_FLAG |
+                        Paint.SUBPIXEL_TEXT_FLAG
         );
 
-        Paint.FontMetrics verseMetrics =
-                versePaint.getFontMetrics();
+        versePaint.setTypeface(typeface);
+        versePaint.setColor(VERSE_COLOR);
+        versePaint.setTextAlign(Paint.Align.CENTER);
+
+        float maxWidth =
+                VIDEO_WIDTH -
+                        (SIDE_MARGIN * 2);
 
         /*
-         * Center the complete verse block vertically in the
-         * available area.
+         * Keep verse below heading and above bottom safe area.
          */
-        float firstTop =
-                verseTop
-                        + (availableHeight
-                        - layout.totalHeight)
-                        / 2.0f;
+        float maxVerseHeight =
+                VIDEO_HEIGHT -
+                        SAFE_BOTTOM -
+                        verseTop -
+                        40f;
 
-        /*
-         * Prevent any accidental movement into the heading
-         * region.
-         */
-        if (firstTop <
-                headingBottom
-                        + HEADING_VERSE_GAP) {
-
-            firstTop =
-                    headingBottom
-                            + HEADING_VERSE_GAP;
+        if (maxVerseHeight < 100f) {
+            maxVerseHeight = 100f;
         }
 
-        float baseline =
-                firstTop
-                        - verseMetrics.top;
+        TextLayoutResult layout =
+                createVerseLayout(
+                        versePaint,
+                        verse,
+                        maxWidth,
+                        maxVerseHeight
+                );
 
-        for (String line :
-                layout.lines) {
+        versePaint.setTextSize(layout.textSize);
+
+        float firstBaseline =
+                verseTop +
+                        ((maxVerseHeight -
+                                layout.totalHeight) / 2f) -
+                        layout.fontTop;
+
+        /*
+         * Additional safety.
+         */
+        float lowestPossible =
+                firstBaseline +
+                        (layout.lines.size() - 1) *
+                                layout.lineHeight +
+                        layout.fontBottom;
+
+        if (lowestPossible >
+                VIDEO_HEIGHT - SAFE_BOTTOM) {
+
+            firstBaseline -=
+                    lowestPossible -
+                            (VIDEO_HEIGHT - SAFE_BOTTOM);
+        }
+
+        for (int i = 0;
+             i < layout.lines.size();
+             i++) {
+
+            String line =
+                    layout.lines.get(i);
+
+            float baseline =
+                    firstBaseline +
+                            i * layout.lineHeight;
 
             canvas.drawText(
                     line,
-                    WIDTH / 2.0f,
+                    VIDEO_WIDTH / 2f,
                     baseline,
                     versePaint
-            );
-
-            baseline +=
-                    layout.lineHeight;
-        }
-
-        /*
-         * Final safety validation.
-         */
-        float actualTop =
-                firstTop;
-
-        float actualBottom =
-                firstTop
-                        + layout.totalHeight;
-
-        if (actualTop <
-                TOP_SAFE) {
-
-            throw new Exception(
-                    "Verse entered top safe area."
-            );
-        }
-
-        if (actualBottom >
-                HEIGHT - BOTTOM_SAFE + 1) {
-
-            throw new Exception(
-                    "Verse entered bottom safe area."
             );
         }
 
@@ -852,22 +851,21 @@ public final class VideoGenerator {
     // TEXT LAYOUT
     // ============================================================
 
-    private static TextLayoutData createTextLayout(
+    private static TextLayoutResult createVerseLayout(
             Paint paint,
             String text,
             float maxWidth,
             float maxHeight
     ) {
 
-        float size =
-                MAX_VERSE_SIZE;
+        /*
+         * Start large and automatically shrink.
+         */
+        float size = 72f;
 
-        while (size >=
-                MIN_VERSE_SIZE) {
+        while (size >= 24f) {
 
-            paint.setTextSize(
-                    size
-            );
+            paint.setTextSize(size);
 
             List<String> lines =
                     wrapText(
@@ -881,36 +879,33 @@ public final class VideoGenerator {
 
             float lineHeight =
                     (metrics.bottom -
-                            metrics.top)
-                            * LINE_SPACING;
+                            metrics.top) *
+                            1.25f;
 
             float totalHeight =
-                    lines.size()
-                            * lineHeight;
+                    lineHeight *
+                            lines.size();
 
-            if (totalHeight <=
-                    maxHeight) {
+            if (totalHeight <= maxHeight) {
 
-                return new TextLayoutData(
+                return new TextLayoutResult(
                         lines,
                         size,
                         lineHeight,
-                        totalHeight
+                        totalHeight,
+                        metrics.top,
+                        metrics.bottom
                 );
             }
 
-            size -= 2.0f;
+            size -= 2f;
         }
 
-        /*
-         * Very long verses.
-         */
-        size =
-                MIN_VERSE_SIZE;
+        // --------------------------------------------------------
+        // Minimum size fallback
+        // --------------------------------------------------------
 
-        paint.setTextSize(
-                size
-        );
+        paint.setTextSize(24f);
 
         List<String> lines =
                 wrapText(
@@ -924,55 +919,22 @@ public final class VideoGenerator {
 
         float lineHeight =
                 (metrics.bottom -
-                        metrics.top)
-                        * LINE_SPACING;
+                        metrics.top) *
+                        1.25f;
 
         float totalHeight =
-                lines.size()
-                        * lineHeight;
+                lineHeight *
+                        lines.size();
 
-        return new TextLayoutData(
+        return new TextLayoutResult(
                 lines,
-                size,
+                24f,
                 lineHeight,
-                totalHeight
+                totalHeight,
+                metrics.top,
+                metrics.bottom
         );
     }
-
-    private static final class TextLayoutData {
-
-        final List<String> lines;
-
-        final float textSize;
-
-        final float lineHeight;
-
-        final float totalHeight;
-
-        TextLayoutData(
-                List<String> lines,
-                float textSize,
-                float lineHeight,
-                float totalHeight
-        ) {
-
-            this.lines =
-                    lines;
-
-            this.textSize =
-                    textSize;
-
-            this.lineHeight =
-                    lineHeight;
-
-            this.totalHeight =
-                    totalHeight;
-        }
-    }
-
-    // ============================================================
-    // WORD WRAPPING
-    // ============================================================
 
     private static List<String> wrapText(
             Paint paint,
@@ -980,51 +942,33 @@ public final class VideoGenerator {
             float maxWidth
     ) {
 
-        List<String> lines =
+        List<String> result =
                 new ArrayList<>();
 
         String cleaned =
-                text
-                        .replace(
-                                "\r",
-                                " "
-                        )
-                        .replace(
-                                "\n",
-                                " "
-                        )
+                text.replace("\r", " ")
+                        .replace("\n", " ")
                         .trim();
 
         if (cleaned.isEmpty()) {
-
-            lines.add("");
-
-            return lines;
+            result.add("");
+            return result;
         }
 
         String[] words =
-                cleaned.split(
-                        "\\s+"
-                );
+                cleaned.split("\\s+");
 
         StringBuilder current =
                 new StringBuilder();
 
-        for (String word :
-                words) {
-
-            if (word.isEmpty()) {
-                continue;
-            }
+        for (String word : words) {
 
             if (current.length() == 0) {
 
                 if (paint.measureText(word)
                         <= maxWidth) {
 
-                    current.append(
-                            word
-                    );
+                    current.append(word);
 
                 } else {
 
@@ -1032,7 +976,7 @@ public final class VideoGenerator {
                             paint,
                             word,
                             maxWidth,
-                            lines
+                            result
                     );
                 }
 
@@ -1040,22 +984,19 @@ public final class VideoGenerator {
             }
 
             String candidate =
-                    current.toString()
-                            + " "
-                            + word;
+                    current +
+                            " " +
+                            word;
 
             if (paint.measureText(candidate)
                     <= maxWidth) {
 
-                current.append(
-                        " "
-                ).append(
-                        word
-                );
+                current.append(" ")
+                        .append(word);
 
             } else {
 
-                lines.add(
+                result.add(
                         current.toString()
                 );
 
@@ -1064,9 +1005,7 @@ public final class VideoGenerator {
                 if (paint.measureText(word)
                         <= maxWidth) {
 
-                    current.append(
-                            word
-                    );
+                    current.append(word);
 
                 } else {
 
@@ -1074,20 +1013,19 @@ public final class VideoGenerator {
                             paint,
                             word,
                             maxWidth,
-                            lines
+                            result
                     );
                 }
             }
         }
 
         if (current.length() > 0) {
-
-            lines.add(
+            result.add(
                     current.toString()
             );
         }
 
-        return lines;
+        return result;
     }
 
     private static void splitLongWord(
@@ -1104,12 +1042,10 @@ public final class VideoGenerator {
              i < word.length();
              i++) {
 
-            char c =
-                    word.charAt(i);
+            char c = word.charAt(i);
 
             String candidate =
-                    part.toString()
-                            + c;
+                    part.toString() + c;
 
             if (part.length() > 0 &&
                     paint.measureText(candidate)
@@ -1126,7 +1062,6 @@ public final class VideoGenerator {
         }
 
         if (part.length() > 0) {
-
             output.add(
                     part.toString()
             );
@@ -1134,91 +1069,7 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // FONT
-    // ============================================================
-
-    private static Typeface loadTypeface(
-            Context context
-    ) throws Exception {
-
-        /*
-         * Directly load from assets.
-         *
-         * No need to create a temporary font file.
-         */
-        try {
-
-            Typeface typeface =
-                    Typeface.createFromAsset(
-                            context.getAssets(),
-                            "font.ttf"
-                    );
-
-            if (typeface != null) {
-                return typeface;
-            }
-
-        } catch (Exception ignored) {
-        }
-
-        /*
-         * Fallback copy if required by a particular Android
-         * implementation.
-         */
-        File fontFile =
-                new File(
-                        context.getCacheDir(),
-                        "font.ttf"
-                );
-
-        try (
-                InputStream input =
-                        context.getAssets()
-                                .open("font.ttf");
-
-                FileOutputStream output =
-                        new FileOutputStream(
-                                fontFile
-                        )
-        ) {
-
-            byte[] buffer =
-                    new byte[64 * 1024];
-
-            int count;
-
-            while ((count =
-                    input.read(buffer)) != -1) {
-
-                output.write(
-                        buffer,
-                        0,
-                        count
-                );
-            }
-        }
-
-        Typeface typeface =
-                Typeface.createFromFile(
-                        fontFile
-                );
-
-        deleteQuietly(
-                fontFile
-        );
-
-        if (typeface == null) {
-
-            throw new Exception(
-                    "Unable to load font.ttf."
-            );
-        }
-
-        return typeface;
-    }
-
-    // ============================================================
-    // CACHED AUDIO
+    // AUDIO CACHE
     // ============================================================
 
     private static File getCachedAudio(
@@ -1228,45 +1079,30 @@ public final class VideoGenerator {
         File cached =
                 new File(
                         context.getCacheDir(),
-                        CACHED_AUDIO
+                        AUDIO_CACHE_NAME
                 );
 
-        /*
-         * If it already exists, immediately reuse it.
-         *
-         * This is what makes bulk generation much faster.
-         */
         if (cached.exists() &&
-                cached.length() > 1024) {
+                cached.length() > 10_000) {
 
             return cached;
         }
 
-        File mp3 =
-                copyAssetToCache(
-                        context,
-                        "bg.mp3"
-                );
-
-        try {
-
-            createEightSecondAudio(
-                    mp3,
-                    cached
-            );
-
-        } finally {
-
-            deleteQuietly(
-                    mp3
-            );
+        if (cached.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            cached.delete();
         }
 
-        if (!cached.exists() ||
-                cached.length() <= 1024) {
+        encodeBackgroundMusicToAac(
+                context,
+                cached
+        );
 
-            throw new Exception(
-                    "Unable to create cached background audio."
+        if (!cached.exists() ||
+                cached.length() < 10_000) {
+
+            throw new IOException(
+                    "AAC audio cache was not created"
             );
         }
 
@@ -1274,54 +1110,62 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // CREATE 8 SECOND AUDIO
+    // MP3 -> AAC
+    //
+    // Creates an exactly 8-second AAC/M4A cache.
+    //
+    // If bg.mp3 is shorter than 8 seconds, it loops.
+    // If longer, only the first 8 seconds are used.
     // ============================================================
 
-    private static void createEightSecondAudio(
-            File mp3,
+    private static void encodeBackgroundMusicToAac(
+            Context context,
             File output
     ) throws Exception {
 
-        if (output.exists()) {
-            deleteQuietly(output);
-        }
-
-        MediaExtractor extractor =
-                new MediaExtractor();
-
+        MediaExtractor extractor = null;
         MediaCodec decoder = null;
         MediaCodec encoder = null;
         MediaMuxer muxer = null;
 
-        boolean decoderStarted = false;
-        boolean encoderStarted = false;
         boolean muxerStarted = false;
 
-        int audioTrack = -1;
         int outputTrack = -1;
 
         try {
 
-            extractor.setDataSource(
-                    mp3.getAbsolutePath()
-            );
+            // ----------------------------------------------------
+            // Open MP3 asset
+            // ----------------------------------------------------
 
-            audioTrack =
-                    findTrack(
-                            extractor,
-                            "audio/"
+            File mp3File =
+                    copyAssetToCache(
+                            context,
+                            "bg.mp3",
+                            "source_bg_music.mp3"
                     );
 
-            if (audioTrack < 0) {
+            extractor =
+                    new MediaExtractor();
 
-                throw new Exception(
-                        "bg.mp3 contains no audio track."
+            extractor.setDataSource(
+                    mp3File.getAbsolutePath()
+            );
+
+            int sourceTrack =
+                    findAudioTrack(extractor);
+
+            if (sourceTrack < 0) {
+                throw new IOException(
+                        "No audio track found in bg.mp3"
                 );
             }
 
+            extractor.selectTrack(sourceTrack);
+
             MediaFormat sourceFormat =
                     extractor.getTrackFormat(
-                            audioTrack
+                            sourceTrack
                     );
 
             String sourceMime =
@@ -1329,58 +1173,43 @@ public final class VideoGenerator {
                             MediaFormat.KEY_MIME
                     );
 
-            if (sourceMime == null) {
+            if (sourceMime == null ||
+                    !sourceMime.startsWith("audio/")) {
 
-                throw new Exception(
-                        "Audio MIME type missing."
+                throw new IOException(
+                        "bg.mp3 is not an audio track"
                 );
             }
 
+            // ----------------------------------------------------
+            // Read sample rate/channels
+            // ----------------------------------------------------
+
             int sampleRate =
-                    getInt(
+                    getFormatInteger(
                             sourceFormat,
                             MediaFormat.KEY_SAMPLE_RATE,
-                            AUDIO_SAMPLE_RATE
+                            44100
                     );
 
             int channels =
-                    getInt(
+                    getFormatInteger(
                             sourceFormat,
                             MediaFormat.KEY_CHANNEL_COUNT,
-                            AUDIO_CHANNELS
+                            2
                     );
 
-            /*
-             * Standard MP3 files used for background music are
-             * normally 44100 Hz stereo.
-             *
-             * To keep this implementation fast, use the decoded
-             * format directly when it matches AAC-supported
-             * parameters.
-             */
-            if (sampleRate != 44100 &&
-                    sampleRate != 48000) {
-
-                throw new Exception(
-                        "bg.mp3 must use 44100 Hz or 48000 Hz."
-                );
+            if (sampleRate <= 0) {
+                sampleRate = 44100;
             }
 
-            if (channels < 1 ||
-                    channels > 2) {
-
-                throw new Exception(
-                        "bg.mp3 must be mono or stereo."
-                );
+            if (channels <= 0) {
+                channels = 2;
             }
 
-            extractor.selectTrack(
-                    audioTrack
-            );
-
-            // ====================================================
-            // DECODER
-            // ====================================================
+            // ----------------------------------------------------
+            // Decoder
+            // ----------------------------------------------------
 
             decoder =
                     MediaCodec.createDecoderByType(
@@ -1396,103 +1225,49 @@ public final class VideoGenerator {
 
             decoder.start();
 
-            decoderStarted = true;
+            // ----------------------------------------------------
+            // Decode only enough PCM for 8 seconds.
+            //
+            // 16-bit PCM:
+            // sampleRate * channels * 2 bytes * 8 seconds
+            // ----------------------------------------------------
 
-            // ====================================================
-            // AAC ENCODER
-            // ====================================================
+            long targetPcmBytesLong =
+                    (long) sampleRate *
+                            8L *
+                            channels *
+                            2L;
 
-            MediaFormat audioFormat =
-                    MediaFormat.createAudioFormat(
-                            AUDIO_MIME,
-                            sampleRate,
-                            channels
+            if (targetPcmBytesLong >
+                    Integer.MAX_VALUE) {
+
+                throw new IOException(
+                        "Audio PCM buffer is too large"
+                );
+            }
+
+            int targetPcmBytes =
+                    (int) targetPcmBytesLong;
+
+            ByteArrayOutputStream pcmOutput =
+                    new ByteArrayOutputStream(
+                            targetPcmBytes
                     );
 
-            audioFormat.setInteger(
-                    MediaFormat.KEY_AAC_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel
-                            .AACObjectLC
-            );
+            boolean inputEOS = false;
+            boolean outputEOS = false;
 
-            audioFormat.setInteger(
-                    MediaFormat.KEY_BIT_RATE,
-                    AUDIO_BITRATE
-            );
+            byte[] tempBuffer =
+                    new byte[64 * 1024];
 
-            audioFormat.setInteger(
-                    MediaFormat.KEY_MAX_INPUT_SIZE,
-                    16384
-            );
+            while (!outputEOS &&
+                    pcmOutput.size() < targetPcmBytes) {
 
-            encoder =
-                    MediaCodec.createEncoderByType(
-                            AUDIO_MIME
-                    );
+                // ------------------------------------------------
+                // Feed decoder
+                // ------------------------------------------------
 
-            encoder.configure(
-                    audioFormat,
-                    null,
-                    null,
-                    MediaCodec.CONFIGURE_FLAG_ENCODE
-            );
-
-            encoder.start();
-
-            encoderStarted = true;
-
-            // ====================================================
-            // MUXER
-            // ====================================================
-
-            muxer =
-                    new MediaMuxer(
-                            output.getAbsolutePath(),
-                            MediaMuxer.OutputFormat
-                                    .MUXER_OUTPUT_MPEG_4
-                    );
-
-            MediaCodec.BufferInfo info =
-                    new MediaCodec.BufferInfo();
-
-            boolean decoderInputDone = false;
-            boolean decoderOutputDone = false;
-
-            long pcmFramesSubmitted = 0;
-
-            final int bytesPerSample = 2;
-
-            final int bytesPerFrame =
-                    channels
-                            * bytesPerSample;
-
-            final long targetFrames =
-                    (long) sampleRate
-                            * DURATION_SECONDS;
-
-            /*
-             * The MP3 may be shorter than 8 seconds.
-             *
-             * For this cached audio we loop the source when
-             * necessary.
-             *
-             * We perform repeated decoder passes if required.
-             */
-            while (pcmFramesSubmitted <
-                    targetFrames) {
-
-                /*
-                 * If this is not the first pass, recreate the
-                 * extractor/decoder.
-                 *
-                 * Keeping this section simple makes the normal
-                 * case (bg.mp3 >= 8 sec) extremely fast.
-                 */
-                if (decoderOutputDone) {
-                    break;
-                }
-
-                if (!decoderInputDone) {
+                if (!inputEOS) {
 
                     int inputIndex =
                             decoder.dequeueInputBuffer(
@@ -1501,61 +1276,56 @@ public final class VideoGenerator {
 
                     if (inputIndex >= 0) {
 
-                        ByteBuffer input =
+                        ByteBuffer inputBuffer =
                                 decoder.getInputBuffer(
                                         inputIndex
                                 );
 
-                        if (input == null) {
+                        if (inputBuffer != null) {
 
-                            throw new Exception(
-                                    "Decoder input buffer unavailable."
-                            );
-                        }
+                            int sampleSize =
+                                    extractor.readSampleData(
+                                            inputBuffer,
+                                            0
+                                    );
 
-                        input.clear();
+                            if (sampleSize < 0) {
 
-                        int size =
-                                extractor.readSampleData(
-                                        input,
+                                decoder.queueInputBuffer(
+                                        inputIndex,
+                                        0,
+                                        0,
+                                        0,
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                );
+
+                                inputEOS = true;
+
+                            } else {
+
+                                long presentationTimeUs =
+                                        extractor.getSampleTime();
+
+                                decoder.queueInputBuffer(
+                                        inputIndex,
+                                        0,
+                                        sampleSize,
+                                        presentationTimeUs,
                                         0
                                 );
 
-                        if (size < 0) {
-
-                            decoder.queueInputBuffer(
-                                    inputIndex,
-                                    0,
-                                    0,
-                                    0,
-                                    MediaCodec
-                                            .BUFFER_FLAG_END_OF_STREAM
-                            );
-
-                            decoderInputDone = true;
-
-                        } else {
-
-                            long pts =
-                                    extractor.getSampleTime();
-
-                            if (pts < 0) {
-                                pts = 0;
+                                extractor.advance();
                             }
-
-                            decoder.queueInputBuffer(
-                                    inputIndex,
-                                    0,
-                                    size,
-                                    pts,
-                                    extractor
-                                            .getSampleFlags()
-                            );
-
-                            extractor.advance();
                         }
                     }
                 }
+
+                // ------------------------------------------------
+                // Get decoder output
+                // ------------------------------------------------
+
+                MediaCodec.BufferInfo info =
+                        new MediaCodec.BufferInfo();
 
                 int outputIndex =
                         decoder.dequeueOutputBuffer(
@@ -1566,328 +1336,419 @@ public final class VideoGenerator {
                 if (outputIndex ==
                         MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
 
-                    continue;
-                }
+                    MediaFormat decodedFormat =
+                            decoder.getOutputFormat();
 
-                if (outputIndex ==
-                        MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    sampleRate =
+                            getFormatInteger(
+                                    decodedFormat,
+                                    MediaFormat.KEY_SAMPLE_RATE,
+                                    sampleRate
+                            );
 
-                    continue;
-                }
+                    channels =
+                            getFormatInteger(
+                                    decodedFormat,
+                                    MediaFormat.KEY_CHANNEL_COUNT,
+                                    channels
+                            );
 
-                if (outputIndex < 0) {
-                    continue;
-                }
+                    targetPcmBytesLong =
+                            (long) sampleRate *
+                                    8L *
+                                    channels *
+                                    2L;
 
-                ByteBuffer pcm =
-                        decoder.getOutputBuffer(
-                                outputIndex
-                        );
+                    if (targetPcmBytesLong >
+                            Integer.MAX_VALUE) {
 
-                if (pcm != null &&
-                        info.size > 0) {
-
-                    pcm.position(
-                            info.offset
-                    );
-
-                    pcm.limit(
-                            info.offset
-                                    + info.size
-                    );
-
-                    int bytes =
-                            pcm.remaining();
-
-                    long remainingFrames =
-                            targetFrames
-                                    - pcmFramesSubmitted;
-
-                    long maximumBytes =
-                            remainingFrames
-                                    * bytesPerFrame;
-
-                    if (bytes >
-                            maximumBytes) {
-
-                        bytes =
-                                (int) maximumBytes;
-
-                        bytes =
-                                (bytes /
-                                        bytesPerFrame)
-                                        * bytesPerFrame;
-
-                        pcm.limit(
-                                pcm.position()
-                                        + bytes
+                        throw new IOException(
+                                "Decoded PCM buffer is too large"
                         );
                     }
 
-                    while (bytes > 0) {
+                    targetPcmBytes =
+                            (int) targetPcmBytesLong;
 
-                        int inputIndex =
-                                encoder.dequeueInputBuffer(
-                                        10_000
+                    continue;
+                }
+
+                if (outputIndex >= 0) {
+
+                    ByteBuffer outputBuffer =
+                            decoder.getOutputBuffer(
+                                    outputIndex
+                            );
+
+                    if (outputBuffer != null &&
+                            info.size > 0) {
+
+                        outputBuffer.position(
+                                info.offset
+                        );
+
+                        outputBuffer.limit(
+                                info.offset +
+                                        info.size
+                        );
+
+                        int remaining =
+                                outputBuffer.remaining();
+
+                        int wanted =
+                                Math.min(
+                                        remaining,
+                                        targetPcmBytes -
+                                                pcmOutput.size()
                                 );
 
-                        if (inputIndex < 0) {
-                            continue;
-                        }
+                        if (wanted > 0) {
 
-                        ByteBuffer input =
+                            while (wanted > 0) {
+
+                                int count =
+                                        Math.min(
+                                                wanted,
+                                                tempBuffer.length
+                                        );
+
+                                outputBuffer.get(
+                                        tempBuffer,
+                                        0,
+                                        count
+                                );
+
+                                pcmOutput.write(
+                                        tempBuffer,
+                                        0,
+                                        count
+                                );
+
+                                wanted -= count;
+                            }
+                        }
+                    }
+
+                    if ((info.flags &
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+
+                        outputEOS = true;
+                    }
+
+                    decoder.releaseOutputBuffer(
+                            outputIndex,
+                            false
+                    );
+                }
+            }
+
+            byte[] sourcePcm =
+                    pcmOutput.toByteArray();
+
+            if (sourcePcm.length == 0) {
+                throw new IOException(
+                        "bg.mp3 produced no PCM audio"
+                );
+            }
+
+            // ----------------------------------------------------
+            // Create exactly 8 seconds of PCM.
+            // ----------------------------------------------------
+
+            byte[] finalPcm =
+                    new byte[targetPcmBytes];
+
+            if (sourcePcm.length >= targetPcmBytes) {
+
+                System.arraycopy(
+                        sourcePcm,
+                        0,
+                        finalPcm,
+                        0,
+                        targetPcmBytes
+                );
+
+            } else {
+
+                int position = 0;
+
+                while (position <
+                        targetPcmBytes) {
+
+                    int count =
+                            Math.min(
+                                    sourcePcm.length,
+                                    targetPcmBytes -
+                                            position
+                            );
+
+                    System.arraycopy(
+                            sourcePcm,
+                            0,
+                            finalPcm,
+                            position,
+                            count
+                    );
+
+                    position += count;
+                }
+            }
+
+            // ----------------------------------------------------
+            // AAC encoder
+            // ----------------------------------------------------
+
+            MediaFormat aacFormat =
+                    MediaFormat.createAudioFormat(
+                            MIME_AUDIO,
+                            sampleRate,
+                            channels
+                    );
+
+            aacFormat.setInteger(
+                    MediaFormat.KEY_AAC_PROFILE,
+                    2
+            );
+
+            /*
+             * 128 kbps is plenty for background music and
+             * considerably smaller/faster than high bitrates.
+             */
+            aacFormat.setInteger(
+                    MediaFormat.KEY_BIT_RATE,
+                    128_000
+            );
+
+            aacFormat.setInteger(
+                    MediaFormat.KEY_MAX_INPUT_SIZE,
+                    16384
+            );
+
+            encoder =
+                    MediaCodec.createEncoderByType(
+                            MIME_AUDIO
+                    );
+
+            encoder.configure(
+                    aacFormat,
+                    null,
+                    null,
+                    MediaCodec.CONFIGURE_FLAG_ENCODE
+            );
+
+            encoder.start();
+
+            // ----------------------------------------------------
+            // AAC muxer
+            // ----------------------------------------------------
+
+            muxer =
+                    new MediaMuxer(
+                            output.getAbsolutePath(),
+                            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                    );
+
+            int pcmPosition = 0;
+
+            boolean encoderInputEOS = false;
+            boolean encoderOutputEOS = false;
+
+            long audioPtsUs = 0;
+
+            /*
+             * Number of bytes per PCM audio frame.
+             */
+            int bytesPerFrame =
+                    channels * 2;
+
+            while (!encoderOutputEOS) {
+
+                // ------------------------------------------------
+                // Feed PCM to AAC encoder
+                // ------------------------------------------------
+
+                if (!encoderInputEOS) {
+
+                    int inputIndex =
+                            encoder.dequeueInputBuffer(
+                                    10_000
+                            );
+
+                    if (inputIndex >= 0) {
+
+                        ByteBuffer inputBuffer =
                                 encoder.getInputBuffer(
                                         inputIndex
                                 );
 
-                        if (input == null) {
-
-                            throw new Exception(
-                                    "AAC input buffer unavailable."
+                        if (inputBuffer == null) {
+                            throw new IOException(
+                                    "AAC encoder input buffer is null"
                             );
                         }
 
-                        input.clear();
+                        inputBuffer.clear();
 
-                        int copy =
-                                Math.min(
-                                        bytes,
-                                        input.remaining()
-                                );
+                        int capacity =
+                                inputBuffer.remaining();
 
-                        copy =
-                                (copy /
-                                        bytesPerFrame)
-                                        * bytesPerFrame;
+                        int remaining =
+                                finalPcm.length -
+                                        pcmPosition;
 
-                        if (copy <= 0) {
+                        if (remaining <= 0) {
 
-                            throw new Exception(
-                                    "AAC input buffer too small."
+                            encoder.queueInputBuffer(
+                                    inputIndex,
+                                    0,
+                                    0,
+                                    audioPtsUs,
+                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
                             );
-                        }
 
-                        byte[] temp =
-                                new byte[copy];
+                            encoderInputEOS = true;
 
-                        pcm.get(
-                                temp
-                        );
+                        } else {
 
-                        input.put(
-                                temp
-                        );
-
-                        long pts =
-                                pcmFramesSubmitted
-                                        * 1_000_000L
-                                        / sampleRate;
-
-                        encoder.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                copy,
-                                pts,
-                                0
-                        );
-
-                        pcmFramesSubmitted +=
-                                copy /
-                                        bytesPerFrame;
-
-                        bytes -= copy;
-
-                        /*
-                         * Drain AAC output immediately.
-                         */
-                        while (true) {
-
-                            int encodedIndex =
-                                    encoder.dequeueOutputBuffer(
-                                            info,
-                                            0
+                            /*
+                             * Keep PCM chunks aligned to complete
+                             * audio frames.
+                             */
+                            int count =
+                                    Math.min(
+                                            capacity,
+                                            remaining
                                     );
 
-                            if (encodedIndex ==
-                                    MediaCodec.INFO_TRY_AGAIN_LATER) {
+                            count -=
+                                    count %
+                                            bytesPerFrame;
 
-                                break;
+                            if (count <= 0) {
+                                count =
+                                        Math.min(
+                                                remaining,
+                                                capacity
+                                        );
                             }
 
-                            if (encodedIndex ==
-                                    MediaCodec
-                                            .INFO_OUTPUT_FORMAT_CHANGED) {
-
-                                if (!muxerStarted) {
-
-                                    outputTrack =
-                                            muxer.addTrack(
-                                                    encoder
-                                                            .getOutputFormat()
-                                            );
-
-                                    muxer.start();
-
-                                    muxerStarted = true;
-                                }
-
-                                continue;
-                            }
-
-                            if (encodedIndex < 0) {
-                                continue;
-                            }
-
-                            ByteBuffer encoded =
-                                    encoder.getOutputBuffer(
-                                            encodedIndex
-                                    );
-
-                            if (encoded != null &&
-                                    info.size > 0 &&
-                                    muxerStarted &&
-                                    (info.flags &
-                                            MediaCodec
-                                                    .BUFFER_FLAG_CODEC_CONFIG)
-                                            == 0) {
-
-                                encoded.position(
-                                        info.offset
-                                );
-
-                                encoded.limit(
-                                        info.offset
-                                                + info.size
-                                );
-
-                                if (info.presentationTimeUs >=
-                                        0 &&
-                                        info.presentationTimeUs <
-                                                DURATION_US) {
-
-                                    muxer.writeSampleData(
-                                            outputTrack,
-                                            encoded,
-                                            info
-                                    );
-                                }
-                            }
-
-                            encoder.releaseOutputBuffer(
-                                    encodedIndex,
-                                    false
+                            inputBuffer.put(
+                                    finalPcm,
+                                    pcmPosition,
+                                    count
                             );
+
+                            long frameCount =
+                                    count /
+                                            bytesPerFrame;
+
+                            long durationUs =
+                                    (frameCount *
+                                            1_000_000L) /
+                                            sampleRate;
+
+                            encoder.queueInputBuffer(
+                                    inputIndex,
+                                    0,
+                                    count,
+                                    audioPtsUs,
+                                    0
+                            );
+
+                            pcmPosition += count;
+                            audioPtsUs += durationUs;
                         }
                     }
                 }
 
-                boolean eos =
-                        (info.flags &
-                                MediaCodec
-                                        .BUFFER_FLAG_END_OF_STREAM)
-                                != 0;
+                // ------------------------------------------------
+                // Drain AAC encoder
+                // ------------------------------------------------
 
-                decoder.releaseOutputBuffer(
-                        outputIndex,
-                        false
-                );
+                MediaCodec.BufferInfo info =
+                        new MediaCodec.BufferInfo();
 
-                if (eos) {
-
-                    decoderOutputDone = true;
-
-                    /*
-                     * If the file is shorter than 8 seconds,
-                     * this implementation will regenerate the
-                     * cached audio from the beginning below.
-                     */
-                    break;
-                }
-            }
-
-            /*
-             * ----------------------------------------------------
-             * If MP3 was shorter than 8 seconds, we need looping.
-             *
-             * The normal Bible background track should generally
-             * be at least 8 seconds. If it is shorter, recreate
-             * the complete audio encoder path with looping.
-             * ----------------------------------------------------
-             */
-            if (pcmFramesSubmitted <
-                    targetFrames) {
-
-                /*
-                 * Finish current encoder before rebuilding.
-                 */
-                encoder.queueInputBuffer(
-                        encoder.dequeueInputBuffer(
-                                10_000
-                        ),
-                        0,
-                        0,
-                        DURATION_US,
-                        MediaCodec
-                                .BUFFER_FLAG_END_OF_STREAM
-                );
-
-                drainEncoderToEnd(
-                        encoder,
-                        muxer,
-                        outputTrack,
-                        muxerStarted
-                );
-
-                throw new Exception(
-                        "bg.mp3 is shorter than 8 seconds. "
-                                + "Use a background MP3 at least 8 seconds long."
-                );
-            }
-
-            /*
-             * Signal AAC EOS.
-             */
-            int eosInput;
-
-            while (true) {
-
-                eosInput =
-                        encoder.dequeueInputBuffer(
+                int outputIndex =
+                        encoder.dequeueOutputBuffer(
+                                info,
                                 10_000
                         );
 
-                if (eosInput >= 0) {
-                    break;
+                if (outputIndex ==
+                        MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+
+                    if (muxerStarted) {
+                        throw new IllegalStateException(
+                                "AAC output format changed twice"
+                        );
+                    }
+
+                    MediaFormat actualAacFormat =
+                            encoder.getOutputFormat();
+
+                    outputTrack =
+                            muxer.addTrack(
+                                    actualAacFormat
+                            );
+
+                    muxer.start();
+
+                    muxerStarted = true;
+
+                    continue;
+                }
+
+                if (outputIndex >= 0) {
+
+                    ByteBuffer outputBuffer =
+                            encoder.getOutputBuffer(
+                                    outputIndex
+                            );
+
+                    if (outputBuffer != null &&
+                            info.size > 0 &&
+                            muxerStarted) {
+
+                        if ((info.flags &
+                                MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+
+                            outputBuffer.position(
+                                    info.offset
+                            );
+
+                            outputBuffer.limit(
+                                    info.offset +
+                                            info.size
+                            );
+
+                            muxer.writeSampleData(
+                                    outputTrack,
+                                    outputBuffer,
+                                    info
+                            );
+                        }
+                    }
+
+                    if ((info.flags &
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+
+                        encoderOutputEOS = true;
+                    }
+
+                    encoder.releaseOutputBuffer(
+                            outputIndex,
+                            false
+                    );
                 }
             }
 
-            encoder.queueInputBuffer(
-                    eosInput,
-                    0,
-                    0,
-                    DURATION_US,
-                    MediaCodec
-                            .BUFFER_FLAG_END_OF_STREAM
-            );
-
-            drainEncoderToEnd(
-                    encoder,
-                    muxer,
-                    outputTrack,
-                    muxerStarted
-            );
-
         } finally {
 
-            if (decoderStarted) {
-
+            if (decoder != null) {
                 try {
                     decoder.stop();
                 } catch (Exception ignored) {
                 }
-            }
-
-            if (decoder != null) {
 
                 try {
                     decoder.release();
@@ -1895,15 +1756,11 @@ public final class VideoGenerator {
                 }
             }
 
-            if (encoderStarted) {
-
+            if (encoder != null) {
                 try {
                     encoder.stop();
                 } catch (Exception ignored) {
                 }
-            }
-
-            if (encoder != null) {
 
                 try {
                     encoder.release();
@@ -1911,10 +1768,16 @@ public final class VideoGenerator {
                 }
             }
 
+            if (extractor != null) {
+                try {
+                    extractor.release();
+                } catch (Exception ignored) {
+                }
+            }
+
             if (muxer != null) {
 
                 if (muxerStarted) {
-
                     try {
                         muxer.stop();
                     } catch (Exception ignored) {
@@ -1926,339 +1789,101 @@ public final class VideoGenerator {
                 } catch (Exception ignored) {
                 }
             }
-
-            try {
-                extractor.release();
-            } catch (Exception ignored) {
-            }
         }
     }
 
     // ============================================================
-    // DRAIN AAC ENCODER
+    // WRITE AUDIO SAMPLES
     // ============================================================
 
-    private static void drainEncoderToEnd(
-            MediaCodec encoder,
-            MediaMuxer muxer,
-            int track,
-            boolean muxerStarted
-    ) throws Exception {
-
-        MediaCodec.BufferInfo info =
-                new MediaCodec.BufferInfo();
-
-        boolean eos = false;
-
-        while (!eos) {
-
-            int index =
-                    encoder.dequeueOutputBuffer(
-                            info,
-                            10_000
-                    );
-
-            if (index ==
-                    MediaCodec.INFO_TRY_AGAIN_LATER) {
-
-                continue;
-            }
-
-            if (index ==
-                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-
-                /*
-                 * The normal path starts the muxer before this
-                 * method. Nothing else is required here.
-                 */
-                continue;
-            }
-
-            if (index < 0) {
-                continue;
-            }
-
-            ByteBuffer buffer =
-                    encoder.getOutputBuffer(
-                            index
-                    );
-
-            if (buffer != null &&
-                    info.size > 0 &&
-                    muxerStarted &&
-                    (info.flags &
-                            MediaCodec
-                                    .BUFFER_FLAG_CODEC_CONFIG)
-                            == 0) {
-
-                buffer.position(
-                        info.offset
-                );
-
-                buffer.limit(
-                        info.offset
-                                + info.size
-                );
-
-                if (info.presentationTimeUs >=
-                        0 &&
-                        info.presentationTimeUs <
-                                DURATION_US) {
-
-                    muxer.writeSampleData(
-                            track,
-                            buffer,
-                            info
-                    );
-                }
-            }
-
-            if ((info.flags &
-                    MediaCodec
-                            .BUFFER_FLAG_END_OF_STREAM)
-                    != 0) {
-
-                eos = true;
-            }
-
-            encoder.releaseOutputBuffer(
-                    index,
-                    false
-            );
-        }
-    }
-
-    // ============================================================
-    // FINAL VIDEO + AUDIO MUX
-    // ============================================================
-
-    private static void muxVideoAndAudio(
-            File videoFile,
-            File audioFile,
-            File output
-    ) throws Exception {
-
-        if (output.exists()) {
-            deleteQuietly(output);
-        }
-
-        MediaExtractor videoExtractor =
-                new MediaExtractor();
-
-        MediaExtractor audioExtractor =
-                new MediaExtractor();
-
-        MediaMuxer muxer = null;
-
-        boolean muxerStarted = false;
-
-        try {
-
-            videoExtractor.setDataSource(
-                    videoFile.getAbsolutePath()
-            );
-
-            audioExtractor.setDataSource(
-                    audioFile.getAbsolutePath()
-            );
-
-            int videoTrack =
-                    findTrack(
-                            videoExtractor,
-                            "video/"
-                    );
-
-            int audioTrack =
-                    findTrack(
-                            audioExtractor,
-                            "audio/"
-                    );
-
-            if (videoTrack < 0) {
-
-                throw new Exception(
-                        "Video track missing."
-                );
-            }
-
-            if (audioTrack < 0) {
-
-                throw new Exception(
-                        "Audio track missing."
-                );
-            }
-
-            videoExtractor.selectTrack(
-                    videoTrack
-            );
-
-            audioExtractor.selectTrack(
-                    audioTrack
-            );
-
-            muxer =
-                    new MediaMuxer(
-                            output.getAbsolutePath(),
-                            MediaMuxer.OutputFormat
-                                    .MUXER_OUTPUT_MPEG_4
-                    );
-
-            int outputVideoTrack =
-                    muxer.addTrack(
-                            videoExtractor
-                                    .getTrackFormat(
-                                            videoTrack
-                                    )
-                    );
-
-            int outputAudioTrack =
-                    muxer.addTrack(
-                            audioExtractor
-                                    .getTrackFormat(
-                                            audioTrack
-                                    )
-                    );
-
-            muxer.start();
-
-            muxerStarted = true;
-
-            /*
-             * Video.
-             */
-            copyTrack(
-                    videoExtractor,
-                    muxer,
-                    outputVideoTrack
-            );
-
-            /*
-             * Audio.
-             */
-            copyTrack(
-                    audioExtractor,
-                    muxer,
-                    outputAudioTrack
-            );
-
-        } finally {
-
-            if (muxer != null) {
-
-                if (muxerStarted) {
-
-                    try {
-                        muxer.stop();
-                    } catch (Exception ignored) {
-                    }
-                }
-
-                try {
-                    muxer.release();
-                } catch (Exception ignored) {
-                }
-            }
-
-            try {
-                videoExtractor.release();
-            } catch (Exception ignored) {
-            }
-
-            try {
-                audioExtractor.release();
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
-    // ============================================================
-    // COPY TRACK
-    // ============================================================
-
-    private static void copyTrack(
+    private static void writeAudioSamples(
             MediaExtractor extractor,
-            MediaMuxer muxer,
-            int destinationTrack
-    ) {
+            int audioTrackIndex,
+            MediaMuxer muxer
+    ) throws Exception {
 
-        /*
-         * Large enough for normal 1080p H.264 frames and AAC
-         * packets.
-         */
         ByteBuffer buffer =
                 ByteBuffer.allocateDirect(
-                        4 * 1024 * 1024
+                        1024 * 1024
                 );
 
         MediaCodec.BufferInfo info =
                 new MediaCodec.BufferInfo();
+
+        long maxPts =
+                8_000_000L;
+
+        boolean wroteAudio = false;
 
         while (true) {
 
             buffer.clear();
 
-            int size =
+            int sampleSize =
                     extractor.readSampleData(
                             buffer,
                             0
                     );
 
-            if (size < 0) {
+            if (sampleSize < 0) {
                 break;
             }
 
-            long pts =
+            long sampleTime =
                     extractor.getSampleTime();
 
-            if (pts < 0) {
+            if (sampleTime < 0) {
                 break;
             }
 
-            /*
-             * Only the first 8 seconds.
-             */
-            if (pts >= DURATION_US) {
+            if (sampleTime >= maxPts) {
                 break;
             }
 
             int flags =
                     extractor.getSampleFlags();
 
-            info.offset = 0;
-            info.size = size;
-            info.presentationTimeUs = pts;
-            info.flags = flags;
+            info.set(
+                    0,
+                    sampleSize,
+                    sampleTime,
+                    flags
+            );
 
             muxer.writeSampleData(
-                    destinationTrack,
+                    audioTrackIndex,
                     buffer,
                     info
             );
 
-            extractor.advance();
+            wroteAudio = true;
+
+            if (!extractor.advance()) {
+                break;
+            }
+        }
+
+        if (!wroteAudio) {
+            throw new IOException(
+                    "No AAC audio samples were written"
+            );
         }
     }
 
     // ============================================================
-    // MEDIA HELPERS
+    // FIND AUDIO TRACK
     // ============================================================
 
-    private static int findTrack(
-            MediaExtractor extractor,
-            String prefix
+    private static int findAudioTrack(
+            MediaExtractor extractor
     ) {
 
-        int count =
-                extractor.getTrackCount();
-
         for (int i = 0;
-             i < count;
+             i < extractor.getTrackCount();
              i++) {
 
             MediaFormat format =
-                    extractor.getTrackFormat(
-                            i
-                    );
+                    extractor.getTrackFormat(i);
 
             String mime =
                     format.getString(
@@ -2266,7 +1891,7 @@ public final class VideoGenerator {
                     );
 
             if (mime != null &&
-                    mime.startsWith(prefix)) {
+                    mime.startsWith("audio/")) {
 
                 return i;
             }
@@ -2275,52 +1900,37 @@ public final class VideoGenerator {
         return -1;
     }
 
-    private static int getInt(
-            MediaFormat format,
-            String key,
-            int fallback
-    ) {
-
-        try {
-
-            if (format.containsKey(key)) {
-
-                return format.getInteger(
-                        key
-                );
-            }
-
-        } catch (Exception ignored) {
-        }
-
-        return fallback;
-    }
-
     // ============================================================
-    // ASSET COPY
+    // COPY ASSET TO CACHE
     // ============================================================
 
     private static File copyAssetToCache(
             Context context,
-            String assetName
+            String assetName,
+            String cacheName
     ) throws Exception {
 
-        File file =
+        File output =
                 new File(
                         context.getCacheDir(),
-                        assetName
+                        cacheName
                 );
 
-        try (
-                InputStream input =
-                        context.getAssets()
-                                .open(assetName);
+        if (output.exists() &&
+                output.length() > 10_000) {
 
-                FileOutputStream output =
-                        new FileOutputStream(
-                                file
-                        )
-        ) {
+            return output;
+        }
+
+        if (output.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            output.delete();
+        }
+
+        try (java.io.InputStream input =
+                     context.getAssets().open(assetName);
+             java.io.FileOutputStream outputStream =
+                     new java.io.FileOutputStream(output)) {
 
             byte[] buffer =
                     new byte[64 * 1024];
@@ -2330,36 +1940,103 @@ public final class VideoGenerator {
             while ((count =
                     input.read(buffer)) != -1) {
 
-                output.write(
+                outputStream.write(
                         buffer,
                         0,
                         count
                 );
             }
+
+            outputStream.flush();
         }
 
-        return file;
+        if (!output.exists() ||
+                output.length() == 0) {
+
+            throw new IOException(
+                    "Could not copy asset: " +
+                            assetName
+            );
+        }
+
+        return output;
     }
 
     // ============================================================
-    // DELETE
+    // FORMAT INTEGER HELPER
     // ============================================================
 
-    private static void deleteQuietly(
-            File file
+    private static int getFormatInteger(
+            MediaFormat format,
+            String key,
+            int defaultValue
     ) {
-
-        if (file == null) {
-            return;
-        }
 
         try {
 
-            if (file.exists()) {
-                file.delete();
+            if (format.containsKey(key)) {
+                return format.getInteger(key);
             }
 
         } catch (Exception ignored) {
         }
+
+        return defaultValue;
+    }
+
+    // ============================================================
+    // TEXT RESULT
+    // ============================================================
+
+    private static final class TextLayoutResult {
+
+        final List<String> lines;
+        final float textSize;
+        final float lineHeight;
+        final float totalHeight;
+        final float fontTop;
+        final float fontBottom;
+
+        TextLayoutResult(
+                List<String> lines,
+                float textSize,
+                float lineHeight,
+                float totalHeight,
+                float fontTop,
+                float fontBottom
+        ) {
+
+            this.lines = lines;
+            this.textSize = textSize;
+            this.lineHeight = lineHeight;
+            this.totalHeight = totalHeight;
+            this.fontTop = fontTop;
+            this.fontBottom = fontBottom;
+        }
+    }
+
+    // ============================================================
+    // SMALL MEDIACODEC CONSTANT HOLDER
+    //
+    // Keeps this file compatible without depending on newer
+    // MediaCodec constant names.
+    // ============================================================
+
+    private static final class MediaCodecInfoCompat {
+
+        /*
+         * MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+         */
+        static final int COLOR_FORMAT_SURFACE = 0x7F000789;
+
+        /*
+         * AVC Baseline profile.
+         */
+        static final int AVC_PROFILE_BASELINE = 1;
+
+        /*
+         * AVC Level 3.1.
+         */
+        static final int AVC_LEVEL_31 = 256;
     }
 }
