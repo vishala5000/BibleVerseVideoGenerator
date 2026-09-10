@@ -6,24 +6,22 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
-import android.media.AudioFormat;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.opengl.EGL14;
+import android.opengl.EGLExt;
 import android.opengl.EGLConfig;
 import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
-import android.opengl.EGLExt;
 import android.opengl.EGLSurface;
 import android.opengl.GLES20;
 import android.view.Surface;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -34,103 +32,196 @@ import java.util.List;
 
 public final class VideoGenerator {
 
+    // ============================================================
+    // VIDEO SETTINGS
+    // ============================================================
+
     private static final int WIDTH = 1080;
     private static final int HEIGHT = 1920;
 
     private static final int FPS = 30;
-    private static final int TOTAL_FRAMES = FPS * 8;
+    private static final int DURATION_SECONDS = 8;
+    private static final int TOTAL_FRAMES =
+            FPS * DURATION_SECONDS;
 
-    private static final long VIDEO_DURATION_US = 8_000_000L;
+    private static final long VIDEO_DURATION_US =
+            8_000_000L;
 
-    private static final int VIDEO_BITRATE = 5_000_000;
+    private static final int VIDEO_BITRATE =
+            5_000_000;
+
+    // ============================================================
+    // SAFE AREA
+    // ============================================================
 
     private static final float SAFE_TOP = 200f;
-    private static final float SAFE_BOTTOM = HEIGHT - 200f;
+    private static final float SAFE_BOTTOM = 1720f;
 
     private static final float TEXT_WRAP_WIDTH = 680f;
-    private static final float TEXT_LEFT =
-            (WIDTH - TEXT_WRAP_WIDTH) / 2f;
+
+    // ============================================================
+    // TEXT SETTINGS
+    // ============================================================
 
     private static final float HEADING_SIZE = 100f;
-    private static final float HEADING_GAP = 65f;
 
     private static final float MAX_VERSE_SIZE = 76f;
     private static final float MIN_VERSE_SIZE = 26f;
 
-    private static final float LINE_SPACING_MULTIPLIER = 1.05f;
+    /*
+     * Tight line spacing so long Bible verses look cleaner.
+     */
+    private static final float LINE_SPACING_MULTIPLIER = 1.02f;
 
-    private static final long HEADING_ANIMATION_US = 450_000L;
-    private static final long VERSE_ANIMATION_US = 650_000L;
+    /*
+     * Space between heading and verse.
+     */
+    private static final float HEADING_GAP = 55f;
 
-    private static final float ENTRANCE_SHIFT = 18f;
-    private static final float BREATHING_SCALE = 0.008f;
+    // ============================================================
+    // ANIMATION
+    // ============================================================
 
-    private static final int AAC_SAMPLE_RATE = 44100;
-    private static final int AAC_CHANNELS = 2;
-    private static final int AAC_BITRATE = 192000;
+    private static final long HEADING_ANIMATION_US =
+            450_000L;
+
+    private static final long VERSE_ANIMATION_US =
+            650_000L;
+
+    private static final float ENTRANCE_SHIFT =
+            18f;
+
+    private static final float BREATHING_SCALE =
+            0.006f;
+
+    // ============================================================
+    // AUDIO
+    // ============================================================
+
+    private static final int AAC_SAMPLE_RATE =
+            44100;
+
+    private static final int AAC_CHANNELS =
+            2;
+
+    private static final int AAC_BITRATE =
+            192000;
 
     private static final String AUDIO_CACHE_NAME =
-            "bible_daily_shine_bg_v4.m4a";
+            "bible_daily_shine_bg_v5.m4a";
 
-    private final Context context;
-
-    private Typeface typeface;
-
-    private static final float[] FULLSCREEN_VERTICES = {
-            -1f, -1f,
-             1f, -1f,
-            -1f,  1f,
-             1f,  1f
-    };
-
-    private static final float[] FULLSCREEN_TEX_COORDS = {
-            0f, 1f,
-            1f, 1f,
-            0f, 0f,
-            1f, 0f
-    };
+    // ============================================================
+    // OPENGL
+    // ============================================================
 
     private static final String VERTEX_SHADER =
             "attribute vec4 aPosition;" +
             "attribute vec2 aTexCoord;" +
             "varying vec2 vTexCoord;" +
             "void main() {" +
-            "  gl_Position = aPosition;" +
-            "  vTexCoord = aTexCoord;" +
+            "    gl_Position = aPosition;" +
+            "    vTexCoord = aTexCoord;" +
             "}";
 
     private static final String FRAGMENT_SHADER =
             "precision mediump float;" +
             "uniform sampler2D uTexture;" +
+            "uniform float uAlpha;" +
             "varying vec2 vTexCoord;" +
             "void main() {" +
-            "  gl_FragColor = texture2D(uTexture, vTexCoord);" +
+            "    vec4 color = texture2D(" +
+            "        uTexture," +
+            "        vTexCoord" +
+            "    );" +
+            "    color.a *= uAlpha;" +
+            "    gl_FragColor = color;" +
             "}";
 
-    public VideoGenerator(Context context) {
-        this.context = context.getApplicationContext();
+    private static final float[] TEX_COORDS = {
+            0f, 1f,
+            1f, 1f,
+            0f, 0f,
+            1f, 0f
+    };
+
+    // ============================================================
+    // INSTANCE
+    // ============================================================
+
+    private final Context context;
+
+    private Typeface typeface;
+
+    private VideoGenerator(
+            Context context
+    ) {
+
+        this.context =
+                context.getApplicationContext();
 
         /*
          * IMPORTANT:
          *
-         * Do not use Typeface.createFromStream().
-         * That method is not available in the Android SDK/API
-         * combination used by this project.
+         * Do NOT use Typeface.createFromStream().
+         *
+         * createFromAsset() works with the Android SDK
+         * used by this project and loads:
+         *
+         * app/src/main/assets/font.ttf
          */
         try {
-            typeface = Typeface.createFromAsset(
-                    context.getAssets(),
-                    "font.ttf"
-            );
+
+            typeface =
+                    Typeface.createFromAsset(
+                            this.context.getAssets(),
+                            "font.ttf"
+                    );
+
         } catch (Exception e) {
-            typeface = Typeface.create(
-                    Typeface.SANS_SERIF,
-                    Typeface.NORMAL
-            );
+
+            typeface =
+                    Typeface.create(
+                            Typeface.SANS_SERIF,
+                            Typeface.NORMAL
+                    );
         }
     }
 
-    public File generateVideo(
+    // ============================================================
+    // MAIN STATIC API
+    // ============================================================
+
+    /*
+     * This is the method required by MainActivity.java.
+     *
+     * MainActivity can call:
+     *
+     * VideoGenerator.generate(
+     *     MainActivity.this,
+     *     verse,
+     *     outputFile
+     * );
+     */
+    public static File generate(
+            Context context,
+            String verseText,
+            File outputFile
+    ) throws Exception {
+
+        VideoGenerator generator =
+                new VideoGenerator(context);
+
+        return generator.generateVideo(
+                verseText,
+                outputFile
+        );
+    }
+
+    // ============================================================
+    // GENERATE VIDEO
+    // ============================================================
+
+    private File generateVideo(
             String verseText,
             File outputFile
     ) throws Exception {
@@ -139,55 +230,93 @@ public final class VideoGenerator {
             verseText = "";
         }
 
-        verseText = verseText
-                .replace("\r", " ")
-                .replace("\n", " ")
-                .trim();
+        verseText =
+                verseText
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                        .trim();
 
         if (verseText.isEmpty()) {
+
             throw new IllegalArgumentException(
                     "Verse text is empty"
             );
         }
 
-        File parent = outputFile.getParentFile();
+        File parent =
+                outputFile.getParentFile();
 
-        if (parent != null && !parent.exists()) {
-            if (!parent.mkdirs() && !parent.exists()) {
+        if (
+                parent != null
+                        &&
+                !parent.exists()
+        ) {
+
+            if (
+                    !parent.mkdirs()
+                            &&
+                    !parent.exists()
+            ) {
+
                 throw new Exception(
                         "Unable to create output directory"
                 );
             }
         }
 
-        File audioCache = createAudioCache();
+        if (outputFile.exists()) {
+            outputFile.delete();
+        }
 
-        TextLayer heading = createHeadingLayer(
-                "Bible Verse"
-        );
+        // --------------------------------------------------------
+        // Create audio cache
+        // --------------------------------------------------------
 
-        TextLayer verse = createVerseLayer(
-                verseText
-        );
+        File audioFile =
+                createAudioCache();
+
+        // --------------------------------------------------------
+        // Create text layers
+        // --------------------------------------------------------
+
+        TextLayer heading =
+                createHeadingLayer(
+                        "Bible Verse"
+                );
+
+        TextLayer verse =
+                createVerseLayer(
+                        verseText
+                );
+
+        // --------------------------------------------------------
+        // Encode final MP4
+        // --------------------------------------------------------
 
         encodeVideo(
                 heading,
                 verse,
-                audioCache,
+                audioFile,
                 outputFile
         );
 
         return outputFile;
     }
 
+    // ============================================================
+    // HEADING
+    // ============================================================
+
     private TextLayer createHeadingLayer(
             String text
     ) {
 
-        Paint paint = new Paint(
-                Paint.ANTI_ALIAS_FLAG |
-                Paint.SUBPIXEL_TEXT_FLAG
-        );
+        Paint paint =
+                new Paint(
+                        Paint.ANTI_ALIAS_FLAG
+                                |
+                        Paint.SUBPIXEL_TEXT_FLAG
+                );
 
         paint.setTypeface(typeface);
         paint.setTextSize(HEADING_SIZE);
@@ -195,28 +324,51 @@ public final class VideoGenerator {
         paint.setStyle(Paint.Style.FILL);
         paint.setTextAlign(Paint.Align.CENTER);
 
-        Paint.FontMetrics fm = paint.getFontMetrics();
+        Paint.FontMetrics metrics =
+                paint.getFontMetrics();
 
-        float width = Math.min(
-                TEXT_WRAP_WIDTH,
-                paint.measureText(text) + 40f
+        float textWidth =
+                paint.measureText(text);
+
+        float bitmapWidth =
+                Math.min(
+                        TEXT_WRAP_WIDTH,
+                        textWidth + 40f
+                );
+
+        float bitmapHeight =
+                (
+                        metrics.bottom
+                                -
+                        metrics.top
+                ) + 40f;
+
+        Bitmap bitmap =
+                Bitmap.createBitmap(
+                        Math.max(
+                                1,
+                                (int) Math.ceil(
+                                        bitmapWidth
+                                )
+                        ),
+                        Math.max(
+                                1,
+                                (int) Math.ceil(
+                                        bitmapHeight
+                                )
+                        ),
+                        Bitmap.Config.ARGB_8888
+                );
+
+        Canvas canvas =
+                new Canvas(bitmap);
+
+        canvas.drawColor(
+                Color.TRANSPARENT
         );
-
-        float height =
-                (fm.bottom - fm.top) + 40f;
-
-        Bitmap bitmap = Bitmap.createBitmap(
-                Math.max(1, (int) Math.ceil(width)),
-                Math.max(1, (int) Math.ceil(height)),
-                Bitmap.Config.ARGB_8888
-        );
-
-        Canvas canvas = new Canvas(bitmap);
-
-        canvas.drawColor(Color.TRANSPARENT);
 
         float baseline =
-                20f - fm.top;
+                20f - metrics.top;
 
         canvas.drawText(
                 text,
@@ -227,31 +379,61 @@ public final class VideoGenerator {
 
         return new TextLayer(
                 bitmap,
-                paint.measureText(text),
-                fm.bottom - fm.top,
-                width,
-                height
+                bitmapWidth,
+                bitmapHeight
         );
     }
+
+    // ============================================================
+    // VERSE
+    // ============================================================
 
     private TextLayer createVerseLayer(
             String text
     ) {
 
-        Paint paint = new Paint(
-                Paint.ANTI_ALIAS_FLAG |
-                Paint.SUBPIXEL_TEXT_FLAG
-        );
+        Paint paint =
+                new Paint(
+                        Paint.ANTI_ALIAS_FLAG
+                                |
+                        Paint.SUBPIXEL_TEXT_FLAG
+                );
 
         paint.setTypeface(typeface);
         paint.setColor(Color.WHITE);
         paint.setStyle(Paint.Style.FILL);
         paint.setTextAlign(Paint.Align.CENTER);
 
-        float selectedSize = MIN_VERSE_SIZE;
-        List<String> selectedLines = null;
-        float selectedLineHeight = 0f;
-        float selectedTotalHeight = 0f;
+        float selectedSize =
+                MIN_VERSE_SIZE;
+
+        List<String> selectedLines =
+                null;
+
+        float selectedLineHeight =
+                0f;
+
+        float selectedTotalHeight =
+                0f;
+
+        /*
+         * The verse must remain below the heading
+         * and above the 200 px bottom safe area.
+         */
+        float maximumAllowedHeight =
+                SAFE_BOTTOM
+                        -
+                SAFE_TOP
+                        -
+                HEADING_SIZE
+                        -
+                HEADING_GAP
+                        -
+                80f;
+
+        // --------------------------------------------------------
+        // Automatically shrink long verses
+        // --------------------------------------------------------
 
         for (
                 float size = MAX_VERSE_SIZE;
@@ -268,41 +450,53 @@ public final class VideoGenerator {
                             TEXT_WRAP_WIDTH
                     );
 
-            Paint.FontMetrics fm =
+            Paint.FontMetrics metrics =
                     paint.getFontMetrics();
 
             float lineHeight =
-                    (fm.bottom - fm.top)
-                            * LINE_SPACING_MULTIPLIER;
+                    (
+                            metrics.bottom
+                                    -
+                            metrics.top
+                    )
+                            *
+                    LINE_SPACING_MULTIPLIER;
 
             float totalHeight =
-                    lineHeight * lines.size();
+                    lineHeight *
+                    lines.size();
 
-            /*
-             * Keep the verse comfortably inside the
-             * vertical safe area.
-             */
-            float maximumAllowedHeight =
-                    SAFE_BOTTOM -
-                    SAFE_TOP -
-                    HEADING_SIZE -
-                    HEADING_GAP -
-                    100f;
+            if (
+                    totalHeight
+                            <=
+                    maximumAllowedHeight
+            ) {
 
-            if (totalHeight <= maximumAllowedHeight) {
+                selectedSize =
+                        size;
 
-                selectedSize = size;
-                selectedLines = lines;
-                selectedLineHeight = lineHeight;
-                selectedTotalHeight = totalHeight;
+                selectedLines =
+                        lines;
+
+                selectedLineHeight =
+                        lineHeight;
+
+                selectedTotalHeight =
+                        totalHeight;
 
                 break;
             }
         }
 
+        // --------------------------------------------------------
+        // Minimum size fallback
+        // --------------------------------------------------------
+
         if (selectedLines == null) {
 
-            paint.setTextSize(MIN_VERSE_SIZE);
+            paint.setTextSize(
+                    MIN_VERSE_SIZE
+            );
 
             selectedLines =
                     wrapText(
@@ -311,55 +505,87 @@ public final class VideoGenerator {
                             TEXT_WRAP_WIDTH
                     );
 
-            Paint.FontMetrics fm =
+            Paint.FontMetrics metrics =
                     paint.getFontMetrics();
 
             selectedLineHeight =
-                    (fm.bottom - fm.top)
-                            * LINE_SPACING_MULTIPLIER;
+                    (
+                            metrics.bottom
+                                    -
+                            metrics.top
+                    )
+                            *
+                    LINE_SPACING_MULTIPLIER;
 
             selectedTotalHeight =
-                    selectedLineHeight *
+                    selectedLineHeight
+                            *
                     selectedLines.size();
 
-            selectedSize = MIN_VERSE_SIZE;
+            selectedSize =
+                    MIN_VERSE_SIZE;
         }
 
-        paint.setTextSize(selectedSize);
+        paint.setTextSize(
+                selectedSize
+        );
 
-        Paint.FontMetrics fm =
+        Paint.FontMetrics metrics =
                 paint.getFontMetrics();
 
         float bitmapHeight =
-                selectedTotalHeight + 30f;
+                selectedTotalHeight
+                        + 30f;
 
-        Bitmap bitmap = Bitmap.createBitmap(
-                (int) TEXT_WRAP_WIDTH,
-                Math.max(
-                        1,
-                        (int) Math.ceil(bitmapHeight)
-                ),
-                Bitmap.Config.ARGB_8888
+        Bitmap bitmap =
+                Bitmap.createBitmap(
+                        (int) TEXT_WRAP_WIDTH,
+                        Math.max(
+                                1,
+                                (int) Math.ceil(
+                                        bitmapHeight
+                                )
+                        ),
+                        Bitmap.Config.ARGB_8888
+                );
+
+        Canvas canvas =
+                new Canvas(bitmap);
+
+        canvas.drawColor(
+                Color.TRANSPARENT
         );
 
-        Canvas canvas = new Canvas(bitmap);
-
-        canvas.drawColor(Color.TRANSPARENT);
+        /*
+         * Center the complete group of lines vertically
+         * inside the bitmap.
+         */
+        float actualTextHeight =
+                metrics.bottom
+                        -
+                metrics.top;
 
         float firstBaseline =
                 15f
-                        - fm.top
-                        + (
+                        -
+                metrics.top
+                        +
+                (
                         selectedLineHeight
                                 -
-                                (fm.bottom - fm.top)
+                        actualTextHeight
                 ) / 2f;
 
-        for (int i = 0; i < selectedLines.size(); i++) {
+        for (
+                int i = 0;
+                i < selectedLines.size();
+                i++
+        ) {
 
             float baseline =
                     firstBaseline
-                            + i * selectedLineHeight;
+                            +
+                    i * selectedLineHeight;
 
             canvas.drawText(
                     selectedLines.get(i),
@@ -372,11 +598,13 @@ public final class VideoGenerator {
         return new TextLayer(
                 bitmap,
                 TEXT_WRAP_WIDTH,
-                selectedTotalHeight,
-                TEXT_WRAP_WIDTH,
                 bitmapHeight
         );
     }
+
+    // ============================================================
+    // TEXT WRAPPING
+    // ============================================================
 
     private List<String> wrapText(
             Paint paint,
@@ -394,7 +622,9 @@ public final class VideoGenerator {
                         .trim();
 
         if (cleaned.isEmpty()) {
+
             result.add("");
+
             return result;
         }
 
@@ -410,10 +640,13 @@ public final class VideoGenerator {
 
                 if (
                         paint.measureText(word)
-                                <= maxWidth
+                                <=
+                        maxWidth
                 ) {
 
-                    current.append(word);
+                    current.append(
+                            word
+                    );
 
                 } else {
 
@@ -429,14 +662,16 @@ public final class VideoGenerator {
             }
 
             String candidate =
-                    current
-                            .toString()
-                            + " "
-                            + word;
+                    current.toString()
+                            +
+                    " "
+                            +
+                    word;
 
             if (
                     paint.measureText(candidate)
-                            <= maxWidth
+                            <=
+                    maxWidth
             ) {
 
                 current
@@ -453,10 +688,13 @@ public final class VideoGenerator {
 
                 if (
                         paint.measureText(word)
-                                <= maxWidth
+                                <=
+                        maxWidth
                 ) {
 
-                    current.append(word);
+                    current.append(
+                            word
+                    );
 
                 } else {
 
@@ -471,6 +709,7 @@ public final class VideoGenerator {
         }
 
         if (current.length() > 0) {
+
             result.add(
                     current.toString()
             );
@@ -489,18 +728,26 @@ public final class VideoGenerator {
         StringBuilder part =
                 new StringBuilder();
 
-        for (int i = 0; i < word.length(); i++) {
+        for (
+                int i = 0;
+                i < word.length();
+                i++
+        ) {
 
-            char c = word.charAt(i);
+            char c =
+                    word.charAt(i);
 
             String candidate =
-                    part.toString() + c;
+                    part.toString()
+                            +
+                    c;
 
             if (
                     part.length() > 0
                             &&
-                    paint.measureText(candidate)
-                            > maxWidth
+                    paint.measureText(
+                            candidate
+                    ) > maxWidth
             ) {
 
                 output.add(
@@ -514,20 +761,25 @@ public final class VideoGenerator {
         }
 
         if (part.length() > 0) {
+
             output.add(
                     part.toString()
             );
         }
     }
 
+    // ============================================================
+    // VIDEO ENCODER
+    // ============================================================
+
     private void encodeVideo(
             TextLayer heading,
             TextLayer verse,
-            File audioCache,
+            File audioFile,
             File outputFile
     ) throws Exception {
 
-        MediaCodec videoEncoder =
+        MediaCodec encoder =
                 MediaCodec.createEncoderByType(
                         "video/avc"
                 );
@@ -560,7 +812,7 @@ public final class VideoGenerator {
                 1
         );
 
-        videoEncoder.configure(
+        encoder.configure(
                 videoFormat,
                 null,
                 null,
@@ -568,29 +820,36 @@ public final class VideoGenerator {
         );
 
         Surface inputSurface =
-                videoEncoder.createInputSurface();
+                encoder.createInputSurface();
 
-        videoEncoder.start();
+        encoder.start();
 
-        EGLDisplay eglDisplay =
+        // --------------------------------------------------------
+        // EGL
+        // --------------------------------------------------------
+
+        EGLDisplay display =
                 EGL14.eglGetDisplay(
                         EGL14.EGL_DEFAULT_DISPLAY
                 );
 
         if (
-                eglDisplay
-                        == EGL14.EGL_NO_DISPLAY
+                display
+                        ==
+                EGL14.EGL_NO_DISPLAY
         ) {
+
             throw new Exception(
-                    "Unable to get EGL display"
+                    "Unable to obtain EGL display"
             );
         }
 
-        int[] version = new int[2];
+        int[] version =
+                new int[2];
 
         if (
                 !EGL14.eglInitialize(
-                        eglDisplay,
+                        display,
                         version,
                         0,
                         version,
@@ -604,12 +863,21 @@ public final class VideoGenerator {
         }
 
         int[] configAttributes = {
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RED_SIZE,
+                8,
+
+                EGL14.EGL_GREEN_SIZE,
+                8,
+
+                EGL14.EGL_BLUE_SIZE,
+                8,
+
+                EGL14.EGL_ALPHA_SIZE,
+                8,
+
                 EGL14.EGL_RENDERABLE_TYPE,
                 EGL14.EGL_OPENGL_ES2_BIT,
+
                 EGL14.EGL_NONE
         };
 
@@ -621,7 +889,7 @@ public final class VideoGenerator {
 
         if (
                 !EGL14.eglChooseConfig(
-                        eglDisplay,
+                        display,
                         configAttributes,
                         0,
                         configs,
@@ -637,7 +905,7 @@ public final class VideoGenerator {
             );
         }
 
-        EGLConfig eglConfig =
+        EGLConfig config =
                 configs[0];
 
         int[] contextAttributes = {
@@ -648,8 +916,8 @@ public final class VideoGenerator {
 
         EGLContext eglContext =
                 EGL14.eglCreateContext(
-                        eglDisplay,
-                        eglConfig,
+                        display,
+                        config,
                         EGL14.EGL_NO_CONTEXT,
                         contextAttributes,
                         0
@@ -657,7 +925,8 @@ public final class VideoGenerator {
 
         if (
                 eglContext
-                        == EGL14.EGL_NO_CONTEXT
+                        ==
+                EGL14.EGL_NO_CONTEXT
         ) {
 
             throw new Exception(
@@ -671,8 +940,8 @@ public final class VideoGenerator {
 
         EGLSurface eglSurface =
                 EGL14.eglCreateWindowSurface(
-                        eglDisplay,
-                        eglConfig,
+                        display,
+                        config,
                         inputSurface,
                         surfaceAttributes,
                         0
@@ -680,17 +949,18 @@ public final class VideoGenerator {
 
         if (
                 eglSurface
-                        == EGL14.EGL_NO_SURFACE
+                        ==
+                EGL14.EGL_NO_SURFACE
         ) {
 
             throw new Exception(
-                    "Unable to create EGL surface"
+                    "Unable to create EGL window surface"
             );
         }
 
         if (
                 !EGL14.eglMakeCurrent(
-                        eglDisplay,
+                        display,
                         eglSurface,
                         eglSurface,
                         eglContext
@@ -698,15 +968,16 @@ public final class VideoGenerator {
         ) {
 
             throw new Exception(
-                    "Unable to make EGL context current"
+                    "Unable to make EGL current"
             );
         }
 
+        // --------------------------------------------------------
+        // GL program
+        // --------------------------------------------------------
+
         int program =
-                createProgram(
-                        VERTEX_SHADER,
-                        FRAGMENT_SHADER
-                );
+                createProgram();
 
         int positionHandle =
                 GLES20.glGetAttribLocation(
@@ -726,282 +997,15 @@ public final class VideoGenerator {
                         "uTexture"
                 );
 
-        FloatBuffer vertexBuffer =
-                createFloatBuffer(
-                        FULLSCREEN_VERTICES
-                );
-
-        FloatBuffer texBuffer =
-                createFloatBuffer(
-                        FULLSCREEN_TEX_COORDS
-                );
-
-        int headingTexture =
-                createTexture(
-                        heading.bitmap
-                );
-
-        int verseTexture =
-                createTexture(
-                        verse.bitmap
-                );
-
-        MediaMuxer muxer =
-                new MediaMuxer(
-                        outputFile.getAbsolutePath(),
-                        MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
-                );
-
-        boolean muxerStarted = false;
-        int videoTrack = -1;
-        int audioTrack = -1;
-
-        MediaCodec.BufferInfo bufferInfo =
-                new MediaCodec.BufferInfo();
-
-        videoEncoder.signalEndOfInputStream();
-
-        /*
-         * We need to render all frames before ending the
-         * EGL surface. The encoder is drained after each
-         * rendered frame so output buffers do not pile up.
-         */
-        videoEncoder.stop();
-
-        /*
-         * Restarting here is not allowed, so the actual
-         * rendering/draining sequence is handled by the
-         * dedicated encoding method below.
-         *
-         * Release current codec and rebuild cleanly.
-         */
-        try {
-            videoEncoder.release();
-        } catch (Exception ignored) {
-        }
-
-        try {
-            GLES20.glDeleteTextures(
-                    1,
-                    new int[]{headingTexture},
-                    0
-            );
-
-            GLES20.glDeleteTextures(
-                    1,
-                    new int[]{verseTexture},
-                    0
-            );
-        } catch (Exception ignored) {
-        }
-
-        EGL14.eglMakeCurrent(
-                eglDisplay,
-                EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_CONTEXT
-        );
-
-        EGL14.eglDestroySurface(
-                eglDisplay,
-                eglSurface
-        );
-
-        EGL14.eglDestroyContext(
-                eglDisplay,
-                eglContext
-        );
-
-        EGL14.eglTerminate(
-                eglDisplay
-        );
-
-        inputSurface.release();
-
-        muxer.release();
-
-        /*
-         * The real encoder pass is performed here.
-         */
-        encodeVideoPass(
-                heading,
-                verse,
-                audioCache,
-                outputFile
-        );
-    }
-
-    private void encodeVideoPass(
-            TextLayer heading,
-            TextLayer verse,
-            File audioCache,
-            File outputFile
-    ) throws Exception {
-
-        MediaCodec videoEncoder =
-                MediaCodec.createEncoderByType(
-                        "video/avc"
-                );
-
-        MediaFormat format =
-                MediaFormat.createVideoFormat(
-                        "video/avc",
-                        WIDTH,
-                        HEIGHT
-                );
-
-        format.setInteger(
-                MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities
-                        .COLOR_FormatSurface
-        );
-
-        format.setInteger(
-                MediaFormat.KEY_BIT_RATE,
-                VIDEO_BITRATE
-        );
-
-        format.setInteger(
-                MediaFormat.KEY_FRAME_RATE,
-                FPS
-        );
-
-        format.setInteger(
-                MediaFormat.KEY_I_FRAME_INTERVAL,
-                1
-        );
-
-        videoEncoder.configure(
-                format,
-                null,
-                null,
-                MediaCodec.CONFIGURE_FLAG_ENCODE
-        );
-
-        Surface inputSurface =
-                videoEncoder.createInputSurface();
-
-        videoEncoder.start();
-
-        EGLDisplay eglDisplay =
-                EGL14.eglGetDisplay(
-                        EGL14.EGL_DEFAULT_DISPLAY
-                );
-
-        int[] version = new int[2];
-
-        if (
-                !EGL14.eglInitialize(
-                        eglDisplay,
-                        version,
-                        0,
-                        version,
-                        1
-                )
-        ) {
-
-            throw new Exception(
-                    "EGL initialization failed"
-            );
-        }
-
-        int[] configAttributes = {
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE,
-                EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_NONE
-        };
-
-        EGLConfig[] configs =
-                new EGLConfig[1];
-
-        int[] numConfigs =
-                new int[1];
-
-        EGL14.eglChooseConfig(
-                eglDisplay,
-                configAttributes,
-                0,
-                configs,
-                0,
-                1,
-                numConfigs,
-                0
-        );
-
-        EGLConfig eglConfig =
-                configs[0];
-
-        int[] contextAttributes = {
-                EGL14.EGL_CONTEXT_CLIENT_VERSION,
-                2,
-                EGL14.EGL_NONE
-        };
-
-        EGLContext eglContext =
-                EGL14.eglCreateContext(
-                        eglDisplay,
-                        eglConfig,
-                        EGL14.EGL_NO_CONTEXT,
-                        contextAttributes,
-                        0
-                );
-
-        int[] surfaceAttributes = {
-                EGL14.EGL_NONE
-        };
-
-        EGLSurface eglSurface =
-                EGL14.eglCreateWindowSurface(
-                        eglDisplay,
-                        eglConfig,
-                        inputSurface,
-                        surfaceAttributes,
-                        0
-                );
-
-        EGL14.eglMakeCurrent(
-                eglDisplay,
-                eglSurface,
-                eglSurface,
-                eglContext
-        );
-
-        int program =
-                createProgram(
-                        VERTEX_SHADER,
-                        FRAGMENT_SHADER
-                );
-
-        int positionHandle =
-                GLES20.glGetAttribLocation(
-                        program,
-                        "aPosition"
-                );
-
-        int texCoordHandle =
-                GLES20.glGetAttribLocation(
-                        program,
-                        "aTexCoord"
-                );
-
-        int textureHandle =
+        int alphaHandle =
                 GLES20.glGetUniformLocation(
                         program,
-                        "uTexture"
+                        "uAlpha"
                 );
 
-        FloatBuffer vertexBuffer =
+        FloatBuffer textureCoordinates =
                 createFloatBuffer(
-                        FULLSCREEN_VERTICES
-                );
-
-        FloatBuffer texBuffer =
-                createFloatBuffer(
-                        FULLSCREEN_TEX_COORDS
+                        TEX_COORDS
                 );
 
         int headingTexture =
@@ -1014,10 +1018,24 @@ public final class VideoGenerator {
                         verse.bitmap
                 );
 
+        // --------------------------------------------------------
+        // Audio track format
+        // --------------------------------------------------------
+
+        MediaFormat audioFormat =
+                getAudioFormat(
+                        audioFile
+                );
+
+        // --------------------------------------------------------
+        // Muxer
+        // --------------------------------------------------------
+
         MediaMuxer muxer =
                 new MediaMuxer(
                         outputFile.getAbsolutePath(),
-                        MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                        MediaMuxer.OutputFormat
+                                .MUXER_OUTPUT_MPEG_4
                 );
 
         int videoTrack = -1;
@@ -1028,275 +1046,396 @@ public final class VideoGenerator {
         MediaCodec.BufferInfo bufferInfo =
                 new MediaCodec.BufferInfo();
 
-        for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
+        try {
 
-            long presentationTimeUs =
-                    frame * 1_000_000L / FPS;
+            // ----------------------------------------------------
+            // Render all frames
+            // ----------------------------------------------------
 
-            drawFrame(
-                    program,
-                    positionHandle,
-                    texCoordHandle,
-                    textureHandle,
-                    vertexBuffer,
-                    texBuffer,
-                    headingTexture,
-                    verseTexture,
-                    heading,
-                    verse,
-                    presentationTimeUs
-            );
+            for (
+                    int frame = 0;
+                    frame < TOTAL_FRAMES;
+                    frame++
+            ) {
 
-            EGLExt.eglPresentationTimeANDROID(
-                    eglDisplay,
-                    eglSurface,
-                    presentationTimeUs * 1000L
-            );
+                long presentationTimeUs =
+                        frame
+                                *
+                        1_000_000L
+                                /
+                        FPS;
 
-            EGL14.eglSwapBuffers(
-                    eglDisplay,
-                    eglSurface
-            );
+                drawFrame(
+                        program,
+                        positionHandle,
+                        texCoordHandle,
+                        textureHandle,
+                        alphaHandle,
+                        textureCoordinates,
+                        headingTexture,
+                        verseTexture,
+                        heading,
+                        verse,
+                        presentationTimeUs
+                );
 
-            while (true) {
+                /*
+                 * Android EGL expects nanoseconds here.
+                 */
+                EGLExt
+                        .eglPresentationTimeANDROID(
+                                display,
+                                eglSurface,
+                                presentationTimeUs
+                                        *
+                                1000L
+                        );
+
+                if (
+                        !EGL14.eglSwapBuffers(
+                                display,
+                                eglSurface
+                        )
+                ) {
+
+                    throw new Exception(
+                            "eglSwapBuffers failed"
+                    );
+                }
+
+                // -----------------------------------------------
+                // Drain available encoder output
+                // -----------------------------------------------
+
+                drainEncoder(
+                        encoder,
+                        muxer,
+                        bufferInfo,
+                        audioFormat,
+                        new TrackState(
+                                videoTrack,
+                                audioTrack,
+                                muxerStarted
+                        )
+                );
+
+                /*
+                 * TrackState is mutable through the returned
+                 * state below.
+                 */
+                TrackState state =
+                        drainEncoderWithState(
+                                encoder,
+                                muxer,
+                                bufferInfo,
+                                audioFormat,
+                                videoTrack,
+                                audioTrack,
+                                muxerStarted
+                        );
+
+                videoTrack =
+                        state.videoTrack;
+
+                audioTrack =
+                        state.audioTrack;
+
+                muxerStarted =
+                        state.muxerStarted;
+            }
+
+            // ----------------------------------------------------
+            // End video input
+            // ----------------------------------------------------
+
+            encoder.signalEndOfInputStream();
+
+            boolean endOfStream =
+                    false;
+
+            while (!endOfStream) {
 
                 int outputIndex =
-                        videoEncoder.dequeueOutputBuffer(
+                        encoder.dequeueOutputBuffer(
                                 bufferInfo,
-                                0
+                                10_000
                         );
 
                 if (
                         outputIndex
-                                == MediaCodec.INFO_TRY_AGAIN_LATER
+                                ==
+                        MediaCodec.INFO_TRY_AGAIN_LATER
                 ) {
-                    break;
+
+                    continue;
                 }
 
                 if (
                         outputIndex
-                                == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                                ==
+                        MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
                 ) {
 
-                    MediaFormat outputFormat =
-                            videoEncoder.getOutputFormat();
+                    if (videoTrack < 0) {
 
-                    videoTrack =
-                            muxer.addTrack(
-                                    outputFormat
-                            );
-
-                    MediaExtractor audioExtractor =
-                            new MediaExtractor();
-
-                    audioExtractor.setDataSource(
-                            audioCache.getAbsolutePath()
-                    );
-
-                    int audioIndex = -1;
-
-                    for (
-                            int i = 0;
-                            i < audioExtractor.getTrackCount();
-                            i++
-                    ) {
-
-                        MediaFormat af =
-                                audioExtractor.getTrackFormat(i);
-
-                        String mime =
-                                af.getString(
-                                        MediaFormat.KEY_MIME
+                        videoTrack =
+                                muxer.addTrack(
+                                        encoder
+                                                .getOutputFormat()
                                 );
-
-                        if (
-                                mime != null
-                                        &&
-                                mime.startsWith("audio/")
-                        ) {
-
-                            audioIndex = i;
-                            break;
-                        }
                     }
 
-                    if (audioIndex < 0) {
-                        audioExtractor.release();
-                        throw new Exception(
-                                "AAC audio track missing"
+                    if (audioTrack < 0) {
+
+                        audioTrack =
+                                muxer.addTrack(
+                                        audioFormat
                         );
                     }
 
-                    MediaFormat audioFormat =
-                            audioExtractor.getTrackFormat(
-                                    audioIndex
-                            );
+                    if (!muxerStarted) {
 
-                    audioTrack =
-                            muxer.addTrack(
-                                    audioFormat
-                            );
+                        muxer.start();
 
-                    audioExtractor.release();
-
-                    muxer.start();
-
-                    muxerStarted = true;
+                        muxerStarted = true;
+                    }
 
                     continue;
                 }
 
                 if (outputIndex >= 0) {
 
-                    ByteBuffer encodedData =
-                            videoEncoder.getOutputBuffer(
+                    ByteBuffer outputBuffer =
+                            encoder.getOutputBuffer(
                                     outputIndex
                             );
 
                     if (
-                            encodedData == null
-                    ) {
-                        throw new RuntimeException(
-                                "Encoder output buffer is null"
-                        );
-                    }
-
-                    if (
-                            (bufferInfo.flags
-                                    &
-                                    MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
-                                    != 0
-                    ) {
-                        bufferInfo.size = 0;
-                    }
-
-                    if (
+                            outputBuffer != null
+                                    &&
                             bufferInfo.size > 0
                                     &&
                             muxerStarted
                     ) {
 
-                        encodedData.position(
+                        outputBuffer.position(
                                 bufferInfo.offset
                         );
 
-                        encodedData.limit(
+                        outputBuffer.limit(
                                 bufferInfo.offset
-                                        + bufferInfo.size
+                                        +
+                                bufferInfo.size
                         );
 
                         muxer.writeSampleData(
                                 videoTrack,
-                                encodedData,
+                                outputBuffer,
                                 bufferInfo
                         );
                     }
 
-                    videoEncoder.releaseOutputBuffer(
+                    endOfStream =
+                            (
+                                    bufferInfo.flags
+                                            &
+                                    MediaCodec
+                                            .BUFFER_FLAG_END_OF_STREAM
+                            ) != 0;
+
+                    encoder.releaseOutputBuffer(
                             outputIndex,
                             false
                     );
-
-                    if (
-                            (bufferInfo.flags
-                                    &
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                    != 0
-                    ) {
-                        break;
-                    }
                 }
             }
+
+            // ----------------------------------------------------
+            // Make sure muxer has started
+            // ----------------------------------------------------
+
+            if (!muxerStarted) {
+
+                /*
+                 * Normally MediaCodec always produces
+                 * INFO_OUTPUT_FORMAT_CHANGED.
+                 */
+                throw new Exception(
+                        "H.264 encoder produced no video track"
+                );
+            }
+
+            // ----------------------------------------------------
+            // Write AAC
+            // ----------------------------------------------------
+
+            writeAudioTrack(
+                    muxer,
+                    audioTrack,
+                    audioFile
+            );
+
+        } finally {
+
+            try {
+                if (muxerStarted) {
+                    muxer.stop();
+                }
+            } catch (Exception ignored) {
+            }
+
+            try {
+                muxer.release();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                encoder.stop();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                encoder.release();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                GLES20.glDeleteTextures(
+                        2,
+                        new int[]{
+                                headingTexture,
+                                verseTexture
+                        },
+                        0
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                GLES20.glDeleteProgram(
+                        program
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                EGL14.eglMakeCurrent(
+                        display,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_CONTEXT
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                EGL14.eglDestroySurface(
+                        display,
+                        eglSurface
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                EGL14.eglDestroyContext(
+                        display,
+                        eglContext
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                EGL14.eglTerminate(
+                        display
+                );
+            } catch (Exception ignored) {
+            }
+
+            try {
+                inputSurface.release();
+            } catch (Exception ignored) {
+            }
         }
+    }
 
-        videoEncoder.signalEndOfInputStream();
+    // ============================================================
+    // DRAIN ENCODER
+    // ============================================================
 
-        boolean videoDone = false;
+    private void drainEncoder(
+            MediaCodec encoder,
+            MediaMuxer muxer,
+            MediaCodec.BufferInfo bufferInfo,
+            MediaFormat audioFormat,
+            TrackState state
+    ) {
+        // Intentionally lightweight.
+        // The stateful drain is performed below.
+    }
 
-        while (!videoDone) {
+    private TrackState drainEncoderWithState(
+            MediaCodec encoder,
+            MediaMuxer muxer,
+            MediaCodec.BufferInfo bufferInfo,
+            MediaFormat audioFormat,
+            int videoTrack,
+            int audioTrack,
+            boolean muxerStarted
+    ) throws Exception {
+
+        TrackState state =
+                new TrackState(
+                        videoTrack,
+                        audioTrack,
+                        muxerStarted
+                );
+
+        while (true) {
 
             int outputIndex =
-                    videoEncoder.dequeueOutputBuffer(
+                    encoder.dequeueOutputBuffer(
                             bufferInfo,
-                            10_000
+                            0
                     );
 
             if (
                     outputIndex
-                            == MediaCodec.INFO_TRY_AGAIN_LATER
+                            ==
+                    MediaCodec.INFO_TRY_AGAIN_LATER
             ) {
-                continue;
+
+                break;
             }
 
             if (
                     outputIndex
-                            == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                            ==
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
             ) {
 
-                if (videoTrack < 0) {
+                if (state.videoTrack < 0) {
 
-                    MediaFormat outputFormat =
-                            videoEncoder.getOutputFormat();
-
-                    videoTrack =
+                    state.videoTrack =
                             muxer.addTrack(
-                                    outputFormat
+                                    encoder
+                                            .getOutputFormat()
                             );
+                }
 
-                    if (audioTrack < 0) {
+                if (state.audioTrack < 0) {
 
-                        MediaExtractor extractor =
-                                new MediaExtractor();
+                    state.audioTrack =
+                            muxer.addTrack(
+                                    audioFormat
+                            );
+                }
 
-                        extractor.setDataSource(
-                                audioCache.getAbsolutePath()
-                        );
-
-                        int audioIndex = -1;
-
-                        for (
-                                int i = 0;
-                                i < extractor.getTrackCount();
-                                i++
-                        ) {
-
-                            MediaFormat af =
-                                    extractor.getTrackFormat(i);
-
-                            String mime =
-                                    af.getString(
-                                            MediaFormat.KEY_MIME
-                                    );
-
-                            if (
-                                    mime != null
-                                            &&
-                                    mime.startsWith(
-                                            "audio/"
-                                    )
-                            ) {
-
-                                audioIndex = i;
-                                break;
-                            }
-                        }
-
-                        if (audioIndex >= 0) {
-
-                            audioTrack =
-                                    muxer.addTrack(
-                                            extractor
-                                                    .getTrackFormat(
-                                                            audioIndex
-                                                    )
-                                    );
-                        }
-
-                        extractor.release();
-                    }
+                if (!state.muxerStarted) {
 
                     muxer.start();
-                    muxerStarted = true;
+
+                    state.muxerStarted =
+                            true;
                 }
 
                 continue;
@@ -1304,125 +1443,57 @@ public final class VideoGenerator {
 
             if (outputIndex >= 0) {
 
-                ByteBuffer encodedData =
-                        videoEncoder.getOutputBuffer(
+                ByteBuffer outputBuffer =
+                        encoder.getOutputBuffer(
                                 outputIndex
                         );
 
                 if (
-                        encodedData != null
+                        outputBuffer != null
                                 &&
                         bufferInfo.size > 0
                                 &&
-                        muxerStarted
+                        state.muxerStarted
                 ) {
 
-                    encodedData.position(
+                    outputBuffer.position(
                             bufferInfo.offset
                     );
 
-                    encodedData.limit(
+                    outputBuffer.limit(
                             bufferInfo.offset
-                                    + bufferInfo.size
+                                    +
+                            bufferInfo.size
                     );
 
                     muxer.writeSampleData(
-                            videoTrack,
-                            encodedData,
+                            state.videoTrack,
+                            outputBuffer,
                             bufferInfo
                     );
                 }
 
-                boolean eos =
-                        (
-                                bufferInfo.flags
-                                        &
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                        ) != 0;
-
-                videoEncoder.releaseOutputBuffer(
+                encoder.releaseOutputBuffer(
                         outputIndex,
                         false
                 );
-
-                if (eos) {
-                    videoDone = true;
-                }
             }
         }
 
-        /*
-         * Write the cached AAC track.
-         */
-        if (
-                muxerStarted
-                        &&
-                audioTrack >= 0
-        ) {
-
-            writeAudioTrack(
-                    muxer,
-                    audioTrack,
-                    audioCache
-            );
-        }
-
-        try {
-            muxer.stop();
-        } catch (Exception ignored) {
-        }
-
-        muxer.release();
-
-        videoEncoder.stop();
-        videoEncoder.release();
-
-        try {
-            GLES20.glDeleteTextures(
-                    1,
-                    new int[]{headingTexture},
-                    0
-            );
-
-            GLES20.glDeleteTextures(
-                    1,
-                    new int[]{verseTexture},
-                    0
-            );
-        } catch (Exception ignored) {
-        }
-
-        EGL14.eglMakeCurrent(
-                eglDisplay,
-                EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_CONTEXT
-        );
-
-        EGL14.eglDestroySurface(
-                eglDisplay,
-                eglSurface
-        );
-
-        EGL14.eglDestroyContext(
-                eglDisplay,
-                eglContext
-        );
-
-        EGL14.eglTerminate(
-                eglDisplay
-        );
-
-        inputSurface.release();
+        return state;
     }
+
+    // ============================================================
+    // DRAW FRAME
+    // ============================================================
 
     private void drawFrame(
             int program,
             int positionHandle,
             int texCoordHandle,
             int textureHandle,
-            FloatBuffer vertexBuffer,
-            FloatBuffer texBuffer,
+            int alphaHandle,
+            FloatBuffer textureCoordinates,
             int headingTexture,
             int verseTexture,
             TextLayer heading,
@@ -1461,39 +1532,74 @@ public final class VideoGenerator {
                 program
         );
 
-        drawTexture(
+        // --------------------------------------------------------
+        // Heading
+        // --------------------------------------------------------
+
+        float headingAlpha =
+                getHeadingAlpha(
+                        timeUs
+                );
+
+        float headingScale =
+                getHeadingScale(
+                        timeUs
+                );
+
+        float headingCenterY =
+                getHeadingCenterY(
+                        timeUs
+                );
+
+        drawLayer(
                 program,
                 positionHandle,
                 texCoordHandle,
                 textureHandle,
-                vertexBuffer,
-                texBuffer,
+                alphaHandle,
+                textureCoordinates,
                 headingTexture,
                 heading,
-                getHeadingY(timeUs),
-                getHeadingAlpha(timeUs),
-                getHeadingScale(timeUs)
+                WIDTH / 2f,
+                headingCenterY,
+                headingScale,
+                headingAlpha
         );
 
-        float verseY =
+        // --------------------------------------------------------
+        // Verse
+        // --------------------------------------------------------
+
+        float verseAlpha =
+                getVerseAlpha(
+                        timeUs
+                );
+
+        float verseScale =
+                getVerseScale(
+                        timeUs
+                );
+
+        float verseCenterY =
                 getVerseCenterY(
                         heading,
                         verse,
                         timeUs
                 );
 
-        drawTexture(
+        drawLayer(
                 program,
                 positionHandle,
                 texCoordHandle,
                 textureHandle,
-                vertexBuffer,
-                texBuffer,
+                alphaHandle,
+                textureCoordinates,
                 verseTexture,
                 verse,
-                verseY,
-                getVerseAlpha(timeUs),
-                getVerseScale(timeUs)
+                WIDTH / 2f,
+                verseCenterY,
+                verseScale,
+                verseAlpha
         );
 
         GLES20.glDisable(
@@ -1501,227 +1607,87 @@ public final class VideoGenerator {
         );
     }
 
-    private float getHeadingY(
-            long timeUs
-    ) {
+    // ============================================================
+    // DRAW TEXTURE
+    // ============================================================
 
-        float progress =
-                Math.min(
-                        1f,
-                        timeUs /
-                                (float) HEADING_ANIMATION_US
-                );
-
-        float eased =
-                1f -
-                        (float) Math.pow(
-                                1f - progress,
-                                3f
-                        );
-
-        float base =
-                SAFE_TOP
-                        +
-                headingHeight();
-
-        return base
-                -
-                ENTRANCE_SHIFT
-                        * (1f - eased);
-    }
-
-    private float headingHeight() {
-        return HEADING_SIZE + 20f;
-    }
-
-    private float getHeadingAlpha(
-            long timeUs
-    ) {
-
-        float progress =
-                Math.min(
-                        1f,
-                        timeUs /
-                                (float) HEADING_ANIMATION_US
-                );
-
-        return progress;
-    }
-
-    private float getHeadingScale(
-            long timeUs
-    ) {
-
-        float progress =
-                Math.min(
-                        1f,
-                        timeUs /
-                                (float) HEADING_ANIMATION_US
-                );
-
-        return 0.96f
-                +
-                0.04f * progress;
-    }
-
-    private float getVerseAlpha(
-            long timeUs
-    ) {
-
-        if (
-                timeUs <= HEADING_ANIMATION_US
-        ) {
-            return 0f;
-        }
-
-        float progress =
-                Math.min(
-                        1f,
-                        (
-                                timeUs
-                                        -
-                                HEADING_ANIMATION_US
-                        )
-                                /
-                                (float)
-                                        VERSE_ANIMATION_US
-                );
-
-        return progress;
-    }
-
-    private float getVerseScale(
-            long timeUs
-    ) {
-
-        float breathing =
-                (float) Math.sin(
-                        timeUs /
-                                1_000_000.0 *
-                                Math.PI *
-                                0.5
-                );
-
-        return 1f
-                +
-                breathing
-                        * BREATHING_SCALE;
-    }
-
-    private float getVerseCenterY(
-            TextLayer heading,
-            TextLayer verse,
-            long timeUs
-    ) {
-
-        float headingTop =
-                SAFE_TOP;
-
-        float headingBottom =
-                headingTop
-                        +
-                        headingHeight();
-
-        float desiredTop =
-                headingBottom
-                        +
-                        HEADING_GAP;
-
-        float desiredCenter =
-                desiredTop
-                        +
-                        verse.height
-                        / 2f;
-
-        float halfHeight =
-                verse.height / 2f;
-
-        float minimumCenter =
-                SAFE_TOP
-                        +
-                        halfHeight;
-
-        float maximumCenter =
-                SAFE_BOTTOM
-                        -
-                        halfHeight;
-
-        float center =
-                Math.max(
-                        minimumCenter,
-                        Math.min(
-                                maximumCenter,
-                                desiredCenter
-                        )
-                );
-
-        if (
-                timeUs
-                        <
-                        HEADING_ANIMATION_US
-                                +
-                        VERSE_ANIMATION_US
-        ) {
-
-            float progress =
-                    Math.max(
-                            0f,
-                            timeUs
-                                    -
-                            HEADING_ANIMATION_US
-                    )
-                            /
-                            (float)
-                                    VERSE_ANIMATION_US;
-
-            progress =
-                    Math.min(
-                            1f,
-                            progress
-                    );
-
-            float eased =
-                    1f -
-                            (float) Math.pow(
-                                    1f - progress,
-                                    3f
-                            );
-
-            center +=
-                    ENTRANCE_SHIFT
-                            * (1f - eased);
-        }
-
-        return Math.max(
-                minimumCenter,
-                Math.min(
-                        maximumCenter,
-                        center
-                )
-        );
-    }
-
-    private void drawTexture(
+    private void drawLayer(
             int program,
             int positionHandle,
             int texCoordHandle,
             int textureHandle,
-            FloatBuffer vertexBuffer,
-            FloatBuffer texBuffer,
+            int alphaHandle,
+            FloatBuffer textureCoordinates,
             int texture,
             TextLayer layer,
+            float centerX,
             float centerY,
-            float alpha,
-            float scale
+            float scale,
+            float alpha
     ) {
 
         if (alpha <= 0f) {
             return;
         }
 
-        GLES20.glUseProgram(
-                program
-        );
+        float halfWidth =
+                (
+                        layer.width
+                                *
+                        scale
+                )
+                        /
+                WIDTH;
+
+        float halfHeight =
+                (
+                        layer.height
+                                *
+                        scale
+                )
+                        /
+                HEIGHT;
+
+        float ndcCenterX =
+                (
+                        centerX
+                                /
+                        WIDTH
+                )
+                        *
+                2f
+                        -
+                1f;
+
+        float ndcCenterY =
+                1f
+                        -
+                (
+                        centerY
+                                /
+                        HEIGHT
+                )
+                        *
+                2f;
+
+        float[] vertices = {
+                ndcCenterX - halfWidth,
+                ndcCenterY - halfHeight,
+
+                ndcCenterX + halfWidth,
+                ndcCenterY - halfHeight,
+
+                ndcCenterX - halfWidth,
+                ndcCenterY + halfHeight,
+
+                ndcCenterX + halfWidth,
+                ndcCenterY + halfHeight
+        };
+
+        FloatBuffer vertexBuffer =
+                createFloatBuffer(
+                        vertices
+                );
 
         vertexBuffer.position(0);
 
@@ -1738,7 +1704,7 @@ public final class VideoGenerator {
                 vertexBuffer
         );
 
-        texBuffer.position(0);
+        textureCoordinates.position(0);
 
         GLES20.glEnableVertexAttribArray(
                 texCoordHandle
@@ -1750,7 +1716,7 @@ public final class VideoGenerator {
                 GLES20.GL_FLOAT,
                 false,
                 0,
-                texBuffer
+                textureCoordinates
         );
 
         GLES20.glActiveTexture(
@@ -1767,68 +1733,11 @@ public final class VideoGenerator {
                 0
         );
 
-        /*
-         * The bitmap is drawn full-screen by the shader,
-         * so the bitmap itself must be positioned by changing
-         * the vertex coordinates.
-         *
-         * We generate scaled NDC coordinates for this layer.
-         */
-        float halfWidth =
-                layer.width
-                        * scale
-                        /
-                        WIDTH;
-
-        float halfHeight =
-                layer.height
-                        * scale
-                        /
-                        HEIGHT;
-
-        float centerX =
-                0f;
-
-        float ndcCenterY =
-                1f
-                        -
-                        2f *
-                        centerY
-                        /
-                        HEIGHT;
-
-        float[] vertices = {
-                centerX - halfWidth,
-                ndcCenterY - halfHeight,
-
-                centerX + halfWidth,
-                ndcCenterY - halfHeight,
-
-                centerX - halfWidth,
-                ndcCenterY + halfHeight,
-
-                centerX + halfWidth,
-                ndcCenterY + halfHeight
-        };
-
-        FloatBuffer layerVertices =
-                createFloatBuffer(
-                        vertices
-                );
-
-        GLES20.glVertexAttribPointer(
-                positionHandle,
-                2,
-                GLES20.GL_FLOAT,
-                false,
-                0,
-                layerVertices
+        GLES20.glUniform1f(
+                alphaHandle,
+                alpha
         );
 
-        /*
-         * Alpha is applied through the texture itself.
-         * The bitmap already contains transparent background.
-         */
         GLES20.glDrawArrays(
                 GLES20.GL_TRIANGLE_STRIP,
                 0,
@@ -1849,11 +1758,411 @@ public final class VideoGenerator {
         );
     }
 
+    // ============================================================
+    // HEADING POSITION
+    // ============================================================
+
+    private float getHeadingCenterY(
+            long timeUs
+    ) {
+
+        float headingHeight =
+                HEADING_SIZE + 20f;
+
+        float baseCenter =
+                SAFE_TOP
+                        +
+                headingHeight / 2f;
+
+        float progress =
+                Math.min(
+                        1f,
+                        timeUs
+                                /
+                        (float)
+                                HEADING_ANIMATION_US
+                );
+
+        float eased =
+                1f
+                        -
+                (float) Math.pow(
+                        1f - progress,
+                        3f
+                );
+
+        return baseCenter
+                -
+                ENTRANCE_SHIFT
+                        *
+                (1f - eased);
+    }
+
+    // ============================================================
+    // HEADING ALPHA
+    // ============================================================
+
+    private float getHeadingAlpha(
+            long timeUs
+    ) {
+
+        float progress =
+                timeUs
+                        /
+                (float)
+                        HEADING_ANIMATION_US;
+
+        return Math.max(
+                0f,
+                Math.min(
+                        1f,
+                        progress
+                )
+        );
+    }
+
+    // ============================================================
+    // HEADING SCALE
+    // ============================================================
+
+    private float getHeadingScale(
+            long timeUs
+    ) {
+
+        float progress =
+                Math.min(
+                        1f,
+                        timeUs
+                                /
+                        (float)
+                                HEADING_ANIMATION_US
+                );
+
+        return 0.96f
+                +
+                0.04f * progress;
+    }
+
+    // ============================================================
+    // VERSE ALPHA
+    // ============================================================
+
+    private float getVerseAlpha(
+            long timeUs
+    ) {
+
+        if (
+                timeUs
+                        <=
+                HEADING_ANIMATION_US
+        ) {
+
+            return 0f;
+        }
+
+        float progress =
+                (
+                        timeUs
+                                -
+                        HEADING_ANIMATION_US
+                )
+                        /
+                (float)
+                        VERSE_ANIMATION_US;
+
+        return Math.max(
+                0f,
+                Math.min(
+                        1f,
+                        progress
+                )
+        );
+    }
+
+    // ============================================================
+    // VERSE SCALE
+    // ============================================================
+
+    private float getVerseScale(
+            long timeUs
+    ) {
+
+        float breathing =
+                (float) Math.sin(
+                        (
+                                timeUs
+                                        /
+                                1_000_000.0
+                        )
+                                *
+                        Math.PI
+                                *
+                        0.5
+                );
+
+        return 1f
+                +
+                breathing
+                        *
+                BREATHING_SCALE;
+    }
+
+    // ============================================================
+    // VERSE POSITION
+    // ============================================================
+
+    private float getVerseCenterY(
+            TextLayer heading,
+            TextLayer verse,
+            long timeUs
+    ) {
+
+        float headingCenter =
+                getHeadingCenterY(
+                        timeUs
+                );
+
+        float headingBottom =
+                headingCenter
+                        +
+                (
+                        heading.height
+                                /
+                        2f
+                );
+
+        float verseTop =
+                headingBottom
+                        +
+                HEADING_GAP;
+
+        float desiredCenter =
+                verseTop
+                        +
+                verse.height / 2f;
+
+        float minimumCenter =
+                SAFE_TOP
+                        +
+                verse.height / 2f;
+
+        float maximumCenter =
+                SAFE_BOTTOM
+                        -
+                verse.height / 2f;
+
+        float center =
+                Math.max(
+                        minimumCenter,
+                        Math.min(
+                                maximumCenter,
+                                desiredCenter
+                        )
+                );
+
+        /*
+         * Verse entrance animation.
+         */
+        if (
+                timeUs
+                        <
+                HEADING_ANIMATION_US
+                        +
+                VERSE_ANIMATION_US
+        ) {
+
+            float start =
+                    HEADING_ANIMATION_US;
+
+            float progress =
+                    (
+                            timeUs
+                                    -
+                            start
+                    )
+                            /
+                    (float)
+                            VERSE_ANIMATION_US;
+
+            progress =
+                    Math.max(
+                            0f,
+                            Math.min(
+                                    1f,
+                                    progress
+                            )
+                    );
+
+            float eased =
+                    1f
+                            -
+                    (float) Math.pow(
+                            1f - progress,
+                            3f
+                    );
+
+            center +=
+                    ENTRANCE_SHIFT
+                            *
+                    (1f - eased);
+        }
+
+        return Math.max(
+                minimumCenter,
+                Math.min(
+                        maximumCenter,
+                        center
+                )
+        );
+    }
+
+    // ============================================================
+    // CREATE OPENGL PROGRAM
+    // ============================================================
+
+    private int createProgram()
+            throws Exception {
+
+        int vertexShader =
+                compileShader(
+                        GLES20.GL_VERTEX_SHADER,
+                        VERTEX_SHADER
+                );
+
+        int fragmentShader =
+                compileShader(
+                        GLES20.GL_FRAGMENT_SHADER,
+                        FRAGMENT_SHADER
+                );
+
+        int program =
+                GLES20.glCreateProgram();
+
+        GLES20.glAttachShader(
+                program,
+                vertexShader
+        );
+
+        GLES20.glAttachShader(
+                program,
+                fragmentShader
+        );
+
+        GLES20.glLinkProgram(
+                program
+        );
+
+        int[] status =
+                new int[1];
+
+        GLES20.glGetProgramiv(
+                program,
+                GLES20.GL_LINK_STATUS,
+                status,
+                0
+        );
+
+        if (
+                status[0]
+                        !=
+                GLES20.GL_TRUE
+        ) {
+
+            String error =
+                    GLES20.glGetProgramInfoLog(
+                            program
+                    );
+
+            GLES20.glDeleteProgram(
+                    program
+            );
+
+            throw new Exception(
+                    "OpenGL program link failed: "
+                            +
+                    error
+            );
+        }
+
+        GLES20.glDeleteShader(
+                vertexShader
+        );
+
+        GLES20.glDeleteShader(
+                fragmentShader
+        );
+
+        return program;
+    }
+
+    // ============================================================
+    // COMPILE SHADER
+    // ============================================================
+
+    private int compileShader(
+            int type,
+            String source
+    ) throws Exception {
+
+        int shader =
+                GLES20.glCreateShader(
+                        type
+                );
+
+        GLES20.glShaderSource(
+                shader,
+                source
+        );
+
+        GLES20.glCompileShader(
+                shader
+        );
+
+        int[] status =
+                new int[1];
+
+        GLES20.glGetShaderiv(
+                shader,
+                GLES20.GL_COMPILE_STATUS,
+                status,
+                0
+        );
+
+        if (
+                status[0]
+                        !=
+                GLES20.GL_TRUE
+        ) {
+
+            String error =
+                    GLES20.glGetShaderInfoLog(
+                            shader
+                    );
+
+            GLES20.glDeleteShader(
+                    shader
+            );
+
+            throw new Exception(
+                    "OpenGL shader compilation failed: "
+                            +
+                    error
+            );
+        }
+
+        return shader;
+    }
+
+    // ============================================================
+    // CREATE TEXTURE
+    // ============================================================
+
     private int createTexture(
             Bitmap bitmap
     ) {
 
-        int[] textures = new int[1];
+        int[] textures =
+                new int[1];
 
         GLES20.glGenTextures(
                 1,
@@ -1908,192 +2217,75 @@ public final class VideoGenerator {
         return texture;
     }
 
-    private int createProgram(
-            String vertexShaderSource,
-            String fragmentShaderSource
-    ) throws Exception {
-
-        int vertexShader =
-                compileShader(
-                        GLES20.GL_VERTEX_SHADER,
-                        vertexShaderSource
-                );
-
-        int fragmentShader =
-                compileShader(
-                        GLES20.GL_FRAGMENT_SHADER,
-                        fragmentShaderSource
-                );
-
-        int program =
-                GLES20.glCreateProgram();
-
-        GLES20.glAttachShader(
-                program,
-                vertexShader
-        );
-
-        GLES20.glAttachShader(
-                program,
-                fragmentShader
-        );
-
-        GLES20.glLinkProgram(
-                program
-        );
-
-        int[] linkStatus =
-                new int[1];
-
-        GLES20.glGetProgramiv(
-                program,
-                GLES20.GL_LINK_STATUS,
-                linkStatus,
-                0
-        );
-
-        if (
-                linkStatus[0]
-                        != GLES20.GL_TRUE
-        ) {
-
-            String error =
-                    GLES20.glGetProgramInfoLog(
-                            program
-                    );
-
-            GLES20.glDeleteProgram(
-                    program
-            );
-
-            throw new Exception(
-                    "GL program link failed: "
-                            + error
-            );
-        }
-
-        GLES20.glDeleteShader(
-                vertexShader
-        );
-
-        GLES20.glDeleteShader(
-                fragmentShader
-        );
-
-        return program;
-    }
-
-    private int compileShader(
-            int type,
-            String source
-    ) throws Exception {
-
-        int shader =
-                GLES20.glCreateShader(
-                        type
-                );
-
-        GLES20.glShaderSource(
-                shader,
-                source
-        );
-
-        GLES20.glCompileShader(
-                shader
-        );
-
-        int[] status =
-                new int[1];
-
-        GLES20.glGetShaderiv(
-                shader,
-                GLES20.GL_COMPILE_STATUS,
-                status,
-                0
-        );
-
-        if (
-                status[0]
-                        != GLES20.GL_TRUE
-        ) {
-
-            String error =
-                    GLES20.glGetShaderInfoLog(
-                            shader
-                    );
-
-            GLES20.glDeleteShader(
-                    shader
-            );
-
-            throw new Exception(
-                    "GL shader compilation failed: "
-                            + error
-            );
-        }
-
-        return shader;
-    }
+    // ============================================================
+    // FLOAT BUFFER
+    // ============================================================
 
     private FloatBuffer createFloatBuffer(
             float[] values
     ) {
 
-        ByteBuffer bb =
+        ByteBuffer buffer =
                 ByteBuffer.allocateDirect(
                         values.length * 4
                 );
 
-        bb.order(
+        buffer.order(
                 ByteOrder.nativeOrder()
         );
 
-        FloatBuffer buffer =
-                bb.asFloatBuffer();
+        FloatBuffer floatBuffer =
+                buffer.asFloatBuffer();
 
-        buffer.put(values);
+        floatBuffer.put(values);
 
-        buffer.position(0);
+        floatBuffer.position(0);
 
-        return buffer;
+        return floatBuffer;
     }
+
+    // ============================================================
+    // AUDIO CACHE
+    // ============================================================
 
     private File createAudioCache()
             throws Exception {
 
-        File cacheDir =
+        File audioDirectory =
                 new File(
                         context.getCacheDir(),
-                        "audio"
+                        "bible_audio"
                 );
 
         if (
-                !cacheDir.exists()
+                !audioDirectory.exists()
                         &&
-                !cacheDir.mkdirs()
+                !audioDirectory.mkdirs()
         ) {
+
             throw new Exception(
-                    "Unable to create audio cache"
+                    "Unable to create audio cache directory"
             );
         }
 
-        File cacheFile =
+        File cachedAudio =
                 new File(
-                        cacheDir,
+                        audioDirectory,
                         AUDIO_CACHE_NAME
                 );
 
         if (
-                cacheFile.exists()
+                cachedAudio.exists()
                         &&
-                cacheFile.length() > 0
+                cachedAudio.length() > 0
         ) {
-            return cacheFile;
+
+            return cachedAudio;
         }
 
         File source =
                 new File(
-                        cacheDir,
+                        audioDirectory,
                         "bg_source.mp3"
                 );
 
@@ -2104,11 +2296,15 @@ public final class VideoGenerator {
 
         createEightSecondAac(
                 source,
-                cacheFile
+                cachedAudio
         );
 
-        return cacheFile;
+        return cachedAudio;
     }
+
+    // ============================================================
+    // COPY ASSET
+    // ============================================================
 
     private void copyAsset(
             String assetName,
@@ -2129,23 +2325,79 @@ public final class VideoGenerator {
             byte[] buffer =
                     new byte[64 * 1024];
 
-            int read;
+            int count;
 
             while (
-                    (read = input.read(buffer))
-                            != -1
+                    (count = input.read(buffer))
+                            !=
+                    -1
             ) {
 
                 output.write(
                         buffer,
                         0,
-                        read
+                        count
                 );
             }
 
             output.flush();
         }
     }
+
+    // ============================================================
+    // AUDIO FORMAT
+    // ============================================================
+
+    private MediaFormat getAudioFormat(
+            File audioFile
+    ) throws Exception {
+
+        MediaExtractor extractor =
+                new MediaExtractor();
+
+        try {
+
+            extractor.setDataSource(
+                    audioFile.getAbsolutePath()
+            );
+
+            for (
+                    int i = 0;
+                    i < extractor.getTrackCount();
+                    i++
+            ) {
+
+                MediaFormat format =
+                        extractor.getTrackFormat(i);
+
+                String mime =
+                        format.getString(
+                                MediaFormat.KEY_MIME
+                        );
+
+                if (
+                        mime != null
+                                &&
+                        mime.startsWith("audio/")
+                ) {
+
+                    return format;
+                }
+            }
+
+        } finally {
+
+            extractor.release();
+        }
+
+        throw new Exception(
+                "AAC audio track not found"
+        );
+    }
+
+    // ============================================================
+    // CREATE EXACT 8 SECOND AAC
+    // ============================================================
 
     private void createEightSecondAac(
             File sourceMp3,
@@ -2159,34 +2411,13 @@ public final class VideoGenerator {
                 sourceMp3.getAbsolutePath()
         );
 
-        int audioTrack = -1;
-
-        for (
-                int i = 0;
-                i < extractor.getTrackCount();
-                i++
-        ) {
-
-            MediaFormat format =
-                    extractor.getTrackFormat(i);
-
-            String mime =
-                    format.getString(
-                            MediaFormat.KEY_MIME
-                    );
-
-            if (
-                    mime != null
-                            &&
-                    mime.startsWith("audio/")
-            ) {
-
-                audioTrack = i;
-                break;
-            }
-        }
+        int audioTrack =
+                findAudioTrack(
+                        extractor
+                );
 
         if (audioTrack < 0) {
+
             extractor.release();
 
             throw new Exception(
@@ -2199,14 +2430,14 @@ public final class VideoGenerator {
                         audioTrack
                 );
 
-        extractor.selectTrack(
-                audioTrack
-        );
-
         String sourceMime =
                 sourceFormat.getString(
                         MediaFormat.KEY_MIME
                 );
+
+        extractor.selectTrack(
+                audioTrack
+        );
 
         MediaCodec decoder =
                 MediaCodec.createDecoderByType(
@@ -2221,6 +2452,11 @@ public final class VideoGenerator {
         );
 
         decoder.start();
+
+        MediaCodec encoder =
+                MediaCodec.createEncoderByType(
+                        "audio/mp4a-latm"
+                );
 
         MediaFormat encoderFormat =
                 MediaFormat.createAudioFormat(
@@ -2245,11 +2481,6 @@ public final class VideoGenerator {
                 16384
         );
 
-        MediaCodec encoder =
-                MediaCodec.createEncoderByType(
-                        "audio/mp4a-latm"
-                );
-
         encoder.configure(
                 encoderFormat,
                 null,
@@ -2259,26 +2490,14 @@ public final class VideoGenerator {
 
         encoder.start();
 
-        MediaMuxer muxer =
-                new MediaMuxer(
-                        outputM4a.getAbsolutePath(),
-                        MediaMuxer.OutputFormat
-                                .MUXER_OUTPUT_MPEG_4
-                );
-
-        int outputTrack = -1;
-        boolean muxerStarted = false;
+        ByteArrayOutputStream pcm =
+                new ByteArrayOutputStream();
 
         MediaCodec.BufferInfo decoderInfo =
                 new MediaCodec.BufferInfo();
 
-        MediaCodec.BufferInfo encoderInfo =
-                new MediaCodec.BufferInfo();
-
-        ByteArrayOutputStream pcm =
-                new ByteArrayOutputStream();
-
-        boolean decoderDone = false;
+        boolean decoderDone =
+                false;
 
         while (!decoderDone) {
 
@@ -2289,18 +2508,18 @@ public final class VideoGenerator {
 
             if (inputIndex >= 0) {
 
-                ByteBuffer input =
+                ByteBuffer inputBuffer =
                         decoder.getInputBuffer(
                                 inputIndex
                         );
 
-                if (input != null) {
+                if (inputBuffer != null) {
 
-                    input.clear();
+                    inputBuffer.clear();
 
                     int sampleSize =
                             extractor.readSampleData(
-                                    input,
+                                    inputBuffer,
                                     0
                             );
 
@@ -2341,31 +2560,34 @@ public final class VideoGenerator {
 
             if (
                     outputIndex
-                            == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                            ==
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
             ) {
+
                 continue;
             }
 
             if (outputIndex >= 0) {
 
-                ByteBuffer output =
+                ByteBuffer outputBuffer =
                         decoder.getOutputBuffer(
                                 outputIndex
                         );
 
                 if (
-                        output != null
+                        outputBuffer != null
                                 &&
                         decoderInfo.size > 0
                 ) {
 
-                    output.position(
+                    outputBuffer.position(
                             decoderInfo.offset
                     );
 
-                    output.limit(
+                    outputBuffer.limit(
                             decoderInfo.offset
-                                    + decoderInfo.size
+                                    +
+                            decoderInfo.size
                     );
 
                     byte[] data =
@@ -2373,7 +2595,9 @@ public final class VideoGenerator {
                                     decoderInfo.size
                             ];
 
-                    output.get(data);
+                    outputBuffer.get(
+                            data
+                    );
 
                     pcm.write(
                             data
@@ -2401,11 +2625,29 @@ public final class VideoGenerator {
 
         decoder.stop();
         decoder.release();
+
         extractor.release();
 
-        byte[] pcmData =
+        byte[] sourcePcm =
                 pcm.toByteArray();
 
+        if (sourcePcm.length == 0) {
+
+            encoder.stop();
+            encoder.release();
+
+            throw new Exception(
+                    "Unable to decode bg.mp3"
+            );
+        }
+
+        /*
+         * 16-bit PCM:
+         *
+         * 44100 samples/sec
+         * 2 channels
+         * 2 bytes/sample
+         */
         int bytesPerSecond =
                 AAC_SAMPLE_RATE
                         *
@@ -2414,212 +2656,277 @@ public final class VideoGenerator {
                 2;
 
         int targetBytes =
-                bytesPerSecond * 8;
+                bytesPerSecond
+                        *
+                DURATION_SECONDS;
 
+        /*
+         * Loop or truncate source audio so it is
+         * exactly 8 seconds.
+         */
         byte[] exactPcm =
                 new byte[targetBytes];
 
-        if (pcmData.length > 0) {
+        for (
+                int i = 0;
+                i < targetBytes;
+                i++
+        ) {
 
-            for (
-                    int i = 0;
-                    i < targetBytes;
-                    i++
-            ) {
-
-                exactPcm[i] =
-                        pcmData[
-                                i % pcmData.length
-                        ];
-            }
+            exactPcm[i] =
+                    sourcePcm[
+                            i % sourcePcm.length
+                    ];
         }
+
+        MediaMuxer muxer =
+                new MediaMuxer(
+                        outputM4a.getAbsolutePath(),
+                        MediaMuxer.OutputFormat
+                                .MUXER_OUTPUT_MPEG_4
+                );
+
+        int audioTrackOutput = -1;
+
+        boolean muxerStarted =
+                false;
+
+        MediaCodec.BufferInfo encoderInfo =
+                new MediaCodec.BufferInfo();
 
         int pcmOffset = 0;
 
-        long presentationTimeUs = 0;
+        long ptsUs = 0;
 
-        boolean encoderInputDone = false;
-        boolean encoderOutputDone = false;
+        boolean inputDone = false;
+        boolean outputDone = false;
 
-        while (!encoderOutputDone) {
+        try {
 
-            if (!encoderInputDone) {
+            while (!outputDone) {
 
-                int inputIndex =
-                        encoder.dequeueInputBuffer(
+                // ----------------------------------------------
+                // Encoder input
+                // ----------------------------------------------
+
+                if (!inputDone) {
+
+                    int inputIndex =
+                            encoder.dequeueInputBuffer(
+                                    10_000
+                            );
+
+                    if (inputIndex >= 0) {
+
+                        ByteBuffer inputBuffer =
+                                encoder.getInputBuffer(
+                                        inputIndex
+                                );
+
+                        if (inputBuffer != null) {
+
+                            inputBuffer.clear();
+
+                            int remaining =
+                                    targetBytes
+                                            -
+                                    pcmOffset;
+
+                            if (remaining <= 0) {
+
+                                encoder.queueInputBuffer(
+                                        inputIndex,
+                                        0,
+                                        0,
+                                        ptsUs,
+                                        MediaCodec
+                                                .BUFFER_FLAG_END_OF_STREAM
+                                );
+
+                                inputDone = true;
+
+                            } else {
+
+                                int count =
+                                        Math.min(
+                                                inputBuffer.remaining(),
+                                                remaining
+                                        );
+
+                                /*
+                                 * Keep complete PCM frames.
+                                 */
+                                int frameSize =
+                                        AAC_CHANNELS * 2;
+
+                                count =
+                                        count
+                                                -
+                                        (
+                                                count
+                                                        %
+                                                frameSize
+                                        );
+
+                                if (count <= 0) {
+                                    count = frameSize;
+                                }
+
+                                count =
+                                        Math.min(
+                                                count,
+                                                remaining
+                                        );
+
+                                inputBuffer.put(
+                                        exactPcm,
+                                        pcmOffset,
+                                        count
+                                );
+
+                                pcmOffset += count;
+
+                                long durationUs =
+                                        (
+                                                count
+                                                        *
+                                                1_000_000L
+                                        )
+                                                /
+                                        bytesPerSecond;
+
+                                encoder.queueInputBuffer(
+                                        inputIndex,
+                                        0,
+                                        count,
+                                        ptsUs,
+                                        0
+                                );
+
+                                ptsUs +=
+                                        durationUs;
+                            }
+                        }
+                    }
+                }
+
+                // ----------------------------------------------
+                // Encoder output
+                // ----------------------------------------------
+
+                int outputIndex =
+                        encoder.dequeueOutputBuffer(
+                                encoderInfo,
                                 10_000
                         );
 
-                if (inputIndex >= 0) {
+                if (
+                        outputIndex
+                                ==
+                        MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                ) {
 
-                    ByteBuffer input =
-                            encoder.getInputBuffer(
-                                    inputIndex
+                    MediaFormat outputFormat =
+                            encoder.getOutputFormat();
+
+                    audioTrackOutput =
+                            muxer.addTrack(
+                                    outputFormat
                             );
 
-                    if (input != null) {
+                    muxer.start();
 
-                        input.clear();
+                    muxerStarted = true;
 
-                        int remaining =
-                                targetBytes
-                                        -
-                                pcmOffset;
+                    continue;
+                }
 
-                        if (remaining <= 0) {
+                if (outputIndex >= 0) {
 
-                            encoder.queueInputBuffer(
-                                    inputIndex,
-                                    0,
-                                    0,
-                                    presentationTimeUs,
+                    ByteBuffer outputBuffer =
+                            encoder.getOutputBuffer(
+                                    outputIndex
+                            );
+
+                    if (
+                            outputBuffer != null
+                                    &&
+                            encoderInfo.size > 0
+                                    &&
+                            muxerStarted
+                    ) {
+
+                        outputBuffer.position(
+                                encoderInfo.offset
+                        );
+
+                        outputBuffer.limit(
+                                encoderInfo.offset
+                                        +
+                                encoderInfo.size
+                        );
+
+                        muxer.writeSampleData(
+                                audioTrackOutput,
+                                outputBuffer,
+                                encoderInfo
+                        );
+                    }
+
+                    boolean eos =
+                            (
+                                    encoderInfo.flags
+                                            &
                                     MediaCodec
                                             .BUFFER_FLAG_END_OF_STREAM
-                            );
+                            ) != 0;
 
-                            encoderInputDone = true;
+                    encoder.releaseOutputBuffer(
+                            outputIndex,
+                            false
+                    );
 
-                        } else {
-
-                            int count =
-                                    Math.min(
-                                            input.remaining(),
-                                            remaining
-                                    );
-
-                            input.put(
-                                    exactPcm,
-                                    pcmOffset,
-                                    count
-                            );
-
-                            pcmOffset += count;
-
-                            long durationUs =
-                                    count
-                                            *
-                                    1_000_000L
-                                            /
-                                    bytesPerSecond;
-
-                            encoder.queueInputBuffer(
-                                    inputIndex,
-                                    0,
-                                    count,
-                                    presentationTimeUs,
-                                    0
-                            );
-
-                            presentationTimeUs +=
-                                    durationUs;
-                        }
+                    if (eos) {
+                        outputDone = true;
                     }
                 }
             }
 
-            int outputIndex =
-                    encoder.dequeueOutputBuffer(
-                            encoderInfo,
-                            10_000
-                    );
+        } finally {
 
-            if (
-                    outputIndex
-                            == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
-            ) {
+            try {
 
-                MediaFormat outputFormat =
-                        encoder.getOutputFormat();
-
-                outputTrack =
-                        muxer.addTrack(
-                                outputFormat
-                        );
-
-                muxer.start();
-
-                muxerStarted = true;
-
-                continue;
-            }
-
-            if (outputIndex >= 0) {
-
-                ByteBuffer output =
-                        encoder.getOutputBuffer(
-                                outputIndex
-                        );
-
-                if (
-                        output != null
-                                &&
-                        encoderInfo.size > 0
-                                &&
-                        muxerStarted
-                ) {
-
-                    output.position(
-                            encoderInfo.offset
-                    );
-
-                    output.limit(
-                            encoderInfo.offset
-                                    + encoderInfo.size
-                    );
-
-                    muxer.writeSampleData(
-                            outputTrack,
-                            output,
-                            encoderInfo
-                    );
+                if (muxerStarted) {
+                    muxer.stop();
                 }
 
-                boolean eos =
-                        (
-                                encoderInfo.flags
-                                        &
-                                MediaCodec
-                                        .BUFFER_FLAG_END_OF_STREAM
-                        ) != 0;
+            } catch (Exception ignored) {
+            }
 
-                encoder.releaseOutputBuffer(
-                        outputIndex,
-                        false
-                );
+            try {
+                muxer.release();
+            } catch (Exception ignored) {
+            }
 
-                if (eos) {
-                    encoderOutputDone = true;
-                }
+            try {
+                encoder.stop();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                encoder.release();
+            } catch (Exception ignored) {
             }
         }
-
-        try {
-            if (muxerStarted) {
-                muxer.stop();
-            }
-        } catch (Exception ignored) {
-        }
-
-        muxer.release();
-
-        encoder.stop();
-        encoder.release();
     }
 
-    private void writeAudioTrack(
-            MediaMuxer muxer,
-            int audioTrack,
-            File audioFile
-    ) throws Exception {
+    // ============================================================
+    // FIND AUDIO TRACK
+    // ============================================================
 
-        MediaExtractor extractor =
-                new MediaExtractor();
-
-        extractor.setDataSource(
-                audioFile.getAbsolutePath()
-        );
-
-        int trackIndex = -1;
+    private int findAudioTrack(
+            MediaExtractor extractor
+    ) {
 
         for (
                 int i = 0;
@@ -2641,21 +2948,53 @@ public final class VideoGenerator {
                     mime.startsWith("audio/")
             ) {
 
-                trackIndex = i;
-                break;
+                return i;
             }
         }
 
-        if (trackIndex < 0) {
+        return -1;
+    }
+
+    // ============================================================
+    // WRITE AUDIO INTO FINAL MP4
+    // ============================================================
+
+    private void writeAudioTrack(
+            MediaMuxer muxer,
+            int audioTrack,
+            File audioFile
+    ) throws Exception {
+
+        if (audioTrack < 0) {
+
+            throw new Exception(
+                    "Invalid audio track"
+            );
+        }
+
+        MediaExtractor extractor =
+                new MediaExtractor();
+
+        extractor.setDataSource(
+                audioFile.getAbsolutePath()
+        );
+
+        int sourceTrack =
+                findAudioTrack(
+                        extractor
+                );
+
+        if (sourceTrack < 0) {
+
             extractor.release();
 
             throw new Exception(
-                    "Audio track not found"
+                    "Audio track missing"
             );
         }
 
         extractor.selectTrack(
-                trackIndex
+                sourceTrack
         );
 
         ByteBuffer buffer =
@@ -2666,44 +3005,57 @@ public final class VideoGenerator {
         MediaCodec.BufferInfo info =
                 new MediaCodec.BufferInfo();
 
-        while (true) {
+        try {
 
-            buffer.clear();
+            while (true) {
 
-            int size =
-                    extractor.readSampleData(
-                            buffer,
-                            0
-                    );
+                buffer.clear();
 
-            if (size < 0) {
-                break;
+                int size =
+                        extractor.readSampleData(
+                                buffer,
+                                0
+                        );
+
+                if (size < 0) {
+                    break;
+                }
+
+                long pts =
+                        extractor.getSampleTime();
+
+                if (pts < 0) {
+                    break;
+                }
+
+                info.offset = 0;
+                info.size = size;
+                info.presentationTimeUs =
+                        pts;
+                info.flags =
+                        extractor.getSampleFlags();
+
+                buffer.position(0);
+                buffer.limit(size);
+
+                muxer.writeSampleData(
+                        audioTrack,
+                        buffer,
+                        info
+                );
+
+                extractor.advance();
             }
 
-            info.offset = 0;
-            info.size = size;
-            info.presentationTimeUs =
-                    extractor.getSampleTime();
+        } finally {
 
-            int flags =
-                    extractor.getSampleFlags();
-
-            info.flags = flags;
-
-            buffer.position(0);
-            buffer.limit(size);
-
-            muxer.writeSampleData(
-                    audioTrack,
-                    buffer,
-                    info
-            );
-
-            extractor.advance();
+            extractor.release();
         }
-
-        extractor.release();
     }
+
+    // ============================================================
+    // TEXT LAYER
+    // ============================================================
 
     private static final class TextLayer {
 
@@ -2712,22 +3064,42 @@ public final class VideoGenerator {
         final float width;
         final float height;
 
-        final float logicalWidth;
-        final float logicalHeight;
-
         TextLayer(
                 Bitmap bitmap,
                 float width,
-                float height,
-                float logicalWidth,
-                float logicalHeight
+                float height
         ) {
 
             this.bitmap = bitmap;
             this.width = width;
             this.height = height;
-            this.logicalWidth = logicalWidth;
-            this.logicalHeight = logicalHeight;
+        }
+    }
+
+    // ============================================================
+    // TRACK STATE
+    // ============================================================
+
+    private static final class TrackState {
+
+        int videoTrack;
+        int audioTrack;
+        boolean muxerStarted;
+
+        TrackState(
+                int videoTrack,
+                int audioTrack,
+                boolean muxerStarted
+        ) {
+
+            this.videoTrack =
+                    videoTrack;
+
+            this.audioTrack =
+                    audioTrack;
+
+            this.muxerStarted =
+                    muxerStarted;
         }
     }
 }
