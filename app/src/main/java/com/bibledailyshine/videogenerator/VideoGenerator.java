@@ -7,16 +7,28 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
+import android.opengl.EGL14;
+import android.opengl.EGLConfig;
+import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLExt;
+import android.opengl.EGLSurface;
+import android.opengl.GLES20;
+import android.opengl.GLUtils;
 import android.view.Surface;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,50 +41,112 @@ public final class VideoGenerator {
     // VIDEO SETTINGS
     // ============================================================
 
-    private static final int VIDEO_WIDTH = 1080;
-    private static final int VIDEO_HEIGHT = 1920;
+    private static final int WIDTH = 1080;
+    private static final int HEIGHT = 1920;
 
     private static final int FPS = 30;
-    private static final int TOTAL_FRAMES = 240; // 8 seconds
 
-    private static final long FRAME_DURATION_US = 1_000_000L / FPS;
+    /*
+     * Exactly 8 seconds at 30 FPS.
+     */
+    private static final int TOTAL_FRAMES = 240;
 
+    private static final long FRAME_TIME_US = 33_333L;
+
+    private static final long VIDEO_DURATION_US = 8_000_000L;
+
+    /*
+     * 5 Mbps.
+     *
+     * This is intentionally moderate for faster encoding on
+     * lower-end Android devices.
+     */
     private static final int VIDEO_BITRATE = 5_000_000;
 
-    private static final String MIME_VIDEO = "video/avc";
-    private static final String MIME_AUDIO = "audio/mp4a-latm";
+    private static final String VIDEO_MIME = "video/avc";
+
+    private static final String AUDIO_MIME = "audio/mp4a-latm";
 
     private static final String HEADING = "Bible Verse";
 
     private static final int SAFE_TOP = 200;
+
     private static final int SAFE_BOTTOM = 200;
 
     private static final int SIDE_MARGIN = 100;
-
-    private static final int HEADING_COLOR = Color.YELLOW;
-    private static final int VERSE_COLOR = Color.WHITE;
 
     private static final int HEADING_SIZE = 100;
 
     private static final float HEADING_GAP = 70f;
 
+    private static final int HEADING_COLOR = Color.YELLOW;
+
+    private static final int VERSE_COLOR = Color.WHITE;
+
     /*
-     * Change this version if you replace bg.mp3 inside a new APK.
-     * This prevents an old cached AAC file from being reused.
+     * Increment this if bg.mp3 is changed in a new APK.
      */
     private static final String AUDIO_CACHE_NAME =
-            "bible_bg_audio_8sec_v2.m4a";
+            "bible_daily_shine_bg_v3.m4a";
+
+    private static final int EGL_RECORDABLE_ANDROID = 0x3142;
+
+    // ============================================================
+    // OPENGL SHADERS
+    // ============================================================
+
+    private static final String VERTEX_SHADER =
+            "attribute vec4 aPosition;\n" +
+            "attribute vec2 aTexCoord;\n" +
+            "varying vec2 vTexCoord;\n" +
+            "void main() {\n" +
+            "    gl_Position = aPosition;\n" +
+            "    vTexCoord = aTexCoord;\n" +
+            "}\n";
+
+    private static final String FRAGMENT_SHADER =
+            "precision mediump float;\n" +
+            "uniform sampler2D uTexture;\n" +
+            "varying vec2 vTexCoord;\n" +
+            "void main() {\n" +
+            "    gl_FragColor = texture2D(uTexture, vTexCoord);\n" +
+            "}\n";
+
+    /*
+     * Full-screen quad.
+     */
+    private static final float[] VERTICES = {
+            -1f, -1f,
+             1f, -1f,
+            -1f,  1f,
+             1f,  1f
+    };
+
+    /*
+     * Bitmap coordinates are top-left based.
+     * OpenGL texture coordinates are bottom-left based.
+     *
+     * This mapping keeps the generated text upright.
+     */
+    private static final float[] TEX_COORDS = {
+            0f, 1f,
+            1f, 1f,
+            0f, 0f,
+            1f, 0f
+    };
 
     // ============================================================
     // PUBLIC API
     // ============================================================
 
-    /**
-     * Generates one 1080x1920, 8-second MP4.
+    /*
+     * MainActivity can continue calling:
      *
-     * MainActivity can continue using:
-     *
-     * VideoGenerator.generate(context, verse, outputFile);
+     * VideoGenerator.generate(
+     *     context,
+     *     verse,
+     *     outputFile
+     * );
      */
     public static void generate(
             Context context,
@@ -81,21 +155,34 @@ public final class VideoGenerator {
     ) throws Exception {
 
         if (context == null) {
-            throw new IllegalArgumentException("Context is null");
+            throw new IllegalArgumentException(
+                    "Context is null"
+            );
         }
 
-        if (verse == null || verse.trim().isEmpty()) {
-            throw new IllegalArgumentException("Verse is empty");
+        if (verse == null ||
+                verse.trim().isEmpty()) {
+
+            throw new IllegalArgumentException(
+                    "Verse is empty"
+            );
         }
 
         if (outputFile == null) {
-            throw new IllegalArgumentException("Output file is null");
+            throw new IllegalArgumentException(
+                    "Output file is null"
+            );
         }
 
-        File parent = outputFile.getParentFile();
+        File parent =
+                outputFile.getParentFile();
 
-        if (parent != null && !parent.exists()) {
-            if (!parent.mkdirs() && !parent.exists()) {
+        if (parent != null &&
+                !parent.exists()) {
+
+            if (!parent.mkdirs() &&
+                    !parent.exists()) {
+
                 throw new IOException(
                         "Cannot create output directory: " +
                                 parent.getAbsolutePath()
@@ -109,18 +196,14 @@ public final class VideoGenerator {
         }
 
         /*
-         * Create/cache AAC only once.
+         * Create/cache AAC once.
          *
-         * For bulk generation all subsequent videos reuse this file.
+         * Bulk videos reuse this same AAC file.
          */
-        File audioFile = getCachedAudio(context);
+        File audioFile =
+                getCachedAudio(context);
 
-        /*
-         * Create final MP4 directly.
-         *
-         * There is NO temporary video-only MP4.
-         */
-        generateVideoWithAudio(
+        generateVideo(
                 context,
                 verse.trim(),
                 audioFile,
@@ -132,49 +215,71 @@ public final class VideoGenerator {
     // MAIN VIDEO GENERATION
     // ============================================================
 
-    private static void generateVideoWithAudio(
+    private static void generateVideo(
             Context context,
             String verse,
             File audioFile,
             File outputFile
     ) throws Exception {
 
-        Bitmap textBitmap = null;
+        Bitmap bitmap = null;
+
         MediaCodec encoder = null;
-        Surface inputSurface = null;
+
+        Surface encoderSurface = null;
+
+        EGLDisplay eglDisplay =
+                EGL14.EGL_NO_DISPLAY;
+
+        EGLContext eglContext =
+                EGL14.EGL_NO_CONTEXT;
+
+        EGLSurface eglSurface =
+                EGL14.EGL_NO_SURFACE;
+
+        EGLConfig eglConfig = null;
 
         MediaExtractor audioExtractor = null;
+
         MediaMuxer muxer = null;
 
         boolean muxerStarted = false;
-        boolean videoFormatReceived = false;
-        boolean videoSampleWritten = false;
 
-        int videoTrackIndex = -1;
-        int audioTrackIndex = -1;
+        int videoTrack = -1;
+
+        int audioTrack = -1;
+
+        boolean videoFormatReceived = false;
+
+        boolean videoSampleWritten = false;
 
         try {
 
-            // ----------------------------------------------------
-            // Render text ONCE.
-            // ----------------------------------------------------
+            // ====================================================
+            // CREATE FINAL TEXT BITMAP ONCE
+            // ====================================================
 
-            textBitmap = createTextBitmap(context, verse);
+            bitmap =
+                    createTextBitmap(
+                            context,
+                            verse
+                    );
 
-            // ----------------------------------------------------
-            // H.264 encoder
-            // ----------------------------------------------------
+            // ====================================================
+            // CREATE H.264 ENCODER
+            // ====================================================
 
             MediaFormat videoFormat =
                     MediaFormat.createVideoFormat(
-                            MIME_VIDEO,
-                            VIDEO_WIDTH,
-                            VIDEO_HEIGHT
+                            VIDEO_MIME,
+                            WIDTH,
+                            HEIGHT
                     );
 
             videoFormat.setInteger(
                     MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfoCompat.COLOR_FORMAT_SURFACE
+                    MediaCodecInfo.CodecCapabilities
+                            .COLOR_FormatSurface
             );
 
             videoFormat.setInteger(
@@ -192,27 +297,10 @@ public final class VideoGenerator {
                     1
             );
 
-            /*
-             * Some Android encoders accept these parameters,
-             * some ignore them.
-             */
-            try {
-                videoFormat.setInteger(
-                        MediaFormat.KEY_PROFILE,
-                        MediaCodecInfoCompat.AVC_PROFILE_BASELINE
-                );
-            } catch (Exception ignored) {
-            }
-
-            try {
-                videoFormat.setInteger(
-                        MediaFormat.KEY_LEVEL,
-                        MediaCodecInfoCompat.AVC_LEVEL_31
-                );
-            } catch (Exception ignored) {
-            }
-
-            encoder = MediaCodec.createEncoderByType(MIME_VIDEO);
+            encoder =
+                    MediaCodec.createEncoderByType(
+                            VIDEO_MIME
+                    );
 
             encoder.configure(
                     videoFormat,
@@ -221,67 +309,143 @@ public final class VideoGenerator {
                     MediaCodec.CONFIGURE_FLAG_ENCODE
             );
 
-            inputSurface = encoder.createInputSurface();
+            /*
+             * IMPORTANT:
+             *
+             * This Surface must be rendered through EGL/OpenGL ES.
+             */
+            encoderSurface =
+                    encoder.createInputSurface();
 
             encoder.start();
 
-            // ----------------------------------------------------
-            // Open cached AAC audio
-            // ----------------------------------------------------
+            // ====================================================
+            // CREATE EGL
+            // ====================================================
 
-            audioExtractor = new MediaExtractor();
-            audioExtractor.setDataSource(audioFile.getAbsolutePath());
+            EglObjects egl =
+                    createEgl(
+                            encoderSurface
+                    );
 
-            int audioSourceTrack = findAudioTrack(audioExtractor);
+            eglDisplay = egl.display;
+
+            eglContext = egl.context;
+
+            eglSurface = egl.surface;
+
+            eglConfig = egl.config;
+
+            // ====================================================
+            // OPEN AUDIO
+            // ====================================================
+
+            audioExtractor =
+                    new MediaExtractor();
+
+            audioExtractor.setDataSource(
+                    audioFile.getAbsolutePath()
+            );
+
+            int audioSourceTrack =
+                    findAudioTrack(
+                            audioExtractor
+                    );
 
             if (audioSourceTrack < 0) {
+
                 throw new IOException(
-                        "Audio track missing from cached AAC file"
+                        "Audio track missing from cached AAC"
                 );
             }
 
-            audioExtractor.selectTrack(audioSourceTrack);
-
-            MediaFormat sourceAudioFormat =
-                    audioExtractor.getTrackFormat(audioSourceTrack);
-
-            // ----------------------------------------------------
-            // Final MP4 muxer
-            // ----------------------------------------------------
-
-            muxer = new MediaMuxer(
-                    outputFile.getAbsolutePath(),
-                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            audioExtractor.selectTrack(
+                    audioSourceTrack
             );
 
-            // ----------------------------------------------------
-            // Render 240 frames
-            // ----------------------------------------------------
+            MediaFormat audioFormat =
+                    audioExtractor.getTrackFormat(
+                            audioSourceTrack
+                    );
 
-            for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
+            // ====================================================
+            // CREATE FINAL MP4 MUXER
+            // ====================================================
 
-                drawBitmapToSurface(
-                        inputSurface,
-                        textBitmap
+            muxer =
+                    new MediaMuxer(
+                            outputFile.getAbsolutePath(),
+                            MediaMuxer.OutputFormat
+                                    .MUXER_OUTPUT_MPEG_4
+                    );
+
+            // ====================================================
+            // OPEN GL TEXTURE
+            // ====================================================
+
+            GlRenderer renderer =
+                    new GlRenderer();
+
+            renderer.initialize(
+                    bitmap
+            );
+
+            // ====================================================
+            // RENDER 240 FRAMES
+            // ====================================================
+
+            for (int frame = 0;
+                 frame < TOTAL_FRAMES;
+                 frame++) {
+
+                long presentationTimeUs =
+                        frame * FRAME_TIME_US;
+
+                /*
+                 * Draw bitmap to the MediaCodec input surface.
+                 */
+                renderer.draw(
+                        WIDTH,
+                        HEIGHT
                 );
+
+                /*
+                 * Explicit frame timestamp.
+                 */
+                EGLExt.eglPresentationTimeANDROID(
+                        eglDisplay,
+                        eglSurface,
+                        presentationTimeUs * 1000L
+                );
+
+                if (!EGL14.eglSwapBuffers(
+                        eglDisplay,
+                        eglSurface
+                )) {
+
+                    throw new IOException(
+                            "EGL swapBuffers failed at frame " +
+                                    frame
+                    );
+                }
 
                 /*
                  * Drain encoder.
                  *
-                 * The first calls are important because the encoder
-                 * will eventually send INFO_OUTPUT_FORMAT_CHANGED.
-                 *
-                 * At that moment we add BOTH tracks and start muxer.
+                 * The first INFO_OUTPUT_FORMAT_CHANGED gives
+                 * us the real H.264 output format.
                  */
                 while (true) {
 
-                    MediaCodec.BufferInfo bufferInfo =
+                    MediaCodec.BufferInfo info =
                             new MediaCodec.BufferInfo();
 
                     int outputIndex =
                             encoder.dequeueOutputBuffer(
-                                    bufferInfo,
-                                    frame == 0 ? 10_000 : 0
+                                    info,
+                                    frame == 0
+                                            ? 10_000
+                                            : 0
                             );
 
                     if (outputIndex ==
@@ -294,42 +458,32 @@ public final class VideoGenerator {
                             MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
 
                         if (videoFormatReceived) {
-                            throw new IllegalStateException(
-                                    "Video output format changed twice"
+
+                            throw new IOException(
+                                    "H.264 output format changed twice"
                             );
                         }
 
                         MediaFormat actualVideoFormat =
                                 encoder.getOutputFormat();
 
-                        if (!MIME_VIDEO.equals(
-                                actualVideoFormat.getString(
-                                        MediaFormat.KEY_MIME
-                                )
-                        )) {
-                            throw new IOException(
-                                    "Encoder returned invalid video MIME: " +
-                                            actualVideoFormat
-                        );
-                        }
-
-                        videoTrackIndex =
-                                muxer.addTrack(actualVideoFormat);
-
-                        /*
-                         * Add the cached AAC track BEFORE starting muxer.
-                         */
-                        MediaFormat audioFormat =
-                                audioExtractor.getTrackFormat(
-                                        audioSourceTrack
+                        videoTrack =
+                                muxer.addTrack(
+                                        actualVideoFormat
                                 );
 
-                        audioTrackIndex =
-                                muxer.addTrack(audioFormat);
+                        /*
+                         * Add BOTH tracks before starting muxer.
+                         */
+                        audioTrack =
+                                muxer.addTrack(
+                                        audioFormat
+                                );
 
                         muxer.start();
 
                         muxerStarted = true;
+
                         videoFormatReceived = true;
 
                         continue;
@@ -337,38 +491,45 @@ public final class VideoGenerator {
 
                     if (outputIndex >= 0) {
 
-                        ByteBuffer encodedBuffer =
-                                encoder.getOutputBuffer(outputIndex);
-
-                        if (encodedBuffer != null &&
-                                bufferInfo.size > 0 &&
-                                muxerStarted) {
-
-                            if ((bufferInfo.flags &
-                                    MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-
-                                encodedBuffer.position(
-                                        bufferInfo.offset
+                        ByteBuffer outputBuffer =
+                                encoder.getOutputBuffer(
+                                        outputIndex
                                 );
 
-                                encodedBuffer.limit(
-                                        bufferInfo.offset +
-                                                bufferInfo.size
+                        if (outputBuffer != null &&
+                                info.size > 0 &&
+                                muxerStarted) {
+
+                            /*
+                             * Ignore codec configuration data.
+                             */
+                            if ((info.flags &
+                                    MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
+                                    == 0) {
+
+                                outputBuffer.position(
+                                        info.offset
+                                );
+
+                                outputBuffer.limit(
+                                        info.offset +
+                                                info.size
                                 );
 
                                 /*
-                                 * Safety: only write valid video samples.
+                                 * Never write beyond 8 seconds.
                                  */
-                                if (bufferInfo.presentationTimeUs
-                                        < 8_000_000L) {
+                                if (info.presentationTimeUs
+                                        < VIDEO_DURATION_US) {
 
                                     muxer.writeSampleData(
-                                            videoTrackIndex,
-                                            encodedBuffer,
-                                            bufferInfo
+                                            videoTrack,
+                                            outputBuffer,
+                                            info
                                     );
 
-                                    videoSampleWritten = true;
+                                    videoSampleWritten =
+                                            true;
                                 }
                             }
                         }
@@ -378,55 +539,48 @@ public final class VideoGenerator {
                                 false
                         );
 
-                        if ((bufferInfo.flags &
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-
-                            break;
-                        }
-
                     } else {
 
                         /*
-                         * Unexpected negative result.
-                         * Just continue.
+                         * Other INFO_* values.
                          */
                         break;
                     }
                 }
             }
 
-            // ----------------------------------------------------
-            // Tell Surface encoder that input is finished.
-            // ----------------------------------------------------
+            // ====================================================
+            // END OF VIDEO INPUT
+            // ====================================================
 
             encoder.signalEndOfInputStream();
 
-            // ----------------------------------------------------
-            // Drain remaining video until EOS.
-            // ----------------------------------------------------
+            // ====================================================
+            // DRAIN FINAL H.264 OUTPUT
+            // ====================================================
 
             boolean videoEOS = false;
 
-            long drainStart = System.currentTimeMillis();
+            long drainStart =
+                    System.currentTimeMillis();
 
             while (!videoEOS) {
 
-                MediaCodec.BufferInfo bufferInfo =
+                MediaCodec.BufferInfo info =
                         new MediaCodec.BufferInfo();
 
                 int outputIndex =
                         encoder.dequeueOutputBuffer(
-                                bufferInfo,
+                                info,
                                 20_000
                         );
 
                 if (outputIndex ==
                         MediaCodec.INFO_TRY_AGAIN_LATER) {
 
-                    /*
-                     * Prevent an endless wait if an encoder behaves badly.
-                     */
-                    if (System.currentTimeMillis() - drainStart > 15_000) {
+                    if (System.currentTimeMillis()
+                            - drainStart > 20_000) {
+
                         throw new IOException(
                                 "H.264 encoder timed out while finishing"
                         );
@@ -443,20 +597,20 @@ public final class VideoGenerator {
                         MediaFormat actualVideoFormat =
                                 encoder.getOutputFormat();
 
-                        videoTrackIndex =
-                                muxer.addTrack(actualVideoFormat);
-
-                        MediaFormat audioFormat =
-                                audioExtractor.getTrackFormat(
-                                        audioSourceTrack
+                        videoTrack =
+                                muxer.addTrack(
+                                        actualVideoFormat
                                 );
 
-                        audioTrackIndex =
-                                muxer.addTrack(audioFormat);
+                        audioTrack =
+                                muxer.addTrack(
+                                        audioFormat
+                                );
 
                         muxer.start();
 
                         muxerStarted = true;
+
                         videoFormatReceived = true;
                     }
 
@@ -465,41 +619,46 @@ public final class VideoGenerator {
 
                 if (outputIndex >= 0) {
 
-                    ByteBuffer encodedBuffer =
-                            encoder.getOutputBuffer(outputIndex);
+                    ByteBuffer outputBuffer =
+                            encoder.getOutputBuffer(
+                                    outputIndex
+                            );
 
-                    if (encodedBuffer != null &&
-                            bufferInfo.size > 0 &&
+                    if (outputBuffer != null &&
+                            info.size > 0 &&
                             muxerStarted) {
 
-                        if ((bufferInfo.flags &
-                                MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        if ((info.flags &
+                                MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
+                                == 0) {
 
-                            encodedBuffer.position(
-                                    bufferInfo.offset
+                            outputBuffer.position(
+                                    info.offset
                             );
 
-                            encodedBuffer.limit(
-                                    bufferInfo.offset +
-                                            bufferInfo.size
+                            outputBuffer.limit(
+                                    info.offset +
+                                            info.size
                             );
 
-                            if (bufferInfo.presentationTimeUs
-                                    < 8_000_000L) {
+                            if (info.presentationTimeUs
+                                    < VIDEO_DURATION_US) {
 
                                 muxer.writeSampleData(
-                                        videoTrackIndex,
-                                        encodedBuffer,
-                                        bufferInfo
+                                        videoTrack,
+                                        outputBuffer,
+                                        info
                                 );
 
-                                videoSampleWritten = true;
+                                videoSampleWritten =
+                                        true;
                             }
                         }
                     }
 
-                    if ((bufferInfo.flags &
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    if ((info.flags &
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            != 0) {
 
                         videoEOS = true;
                     }
@@ -512,52 +671,98 @@ public final class VideoGenerator {
                 } else {
 
                     /*
-                     * Other INFO_* values.
+                     * Keep waiting for EOS.
                      */
                 }
             }
 
-            // ----------------------------------------------------
-            // IMPORTANT VALIDATION
-            // ----------------------------------------------------
+            // ====================================================
+            // VALIDATE VIDEO
+            // ====================================================
 
             if (!videoFormatReceived) {
+
                 throw new IOException(
-                        "H.264 encoder never produced a video output format"
+                        "H.264 encoder did not produce an output format"
                 );
             }
 
             if (!videoSampleWritten) {
+
                 throw new IOException(
                         "H.264 encoder produced no video samples"
                 );
             }
 
             if (!muxerStarted) {
+
                 throw new IOException(
                         "MediaMuxer was never started"
                 );
             }
 
-            // ----------------------------------------------------
-            // Write cached AAC samples.
-            //
-            // Audio is exactly 8 seconds.
-            // ----------------------------------------------------
+            // ====================================================
+            // WRITE AAC
+            // ====================================================
 
             writeAudioSamples(
                     audioExtractor,
-                    audioTrackIndex,
+                    audioTrack,
                     muxer
             );
 
+            // ====================================================
+            // CLEAN EGL GL RESOURCES
+            // ====================================================
+
+            renderer.release();
+
         } finally {
 
-            // ----------------------------------------------------
-            // Release encoder
-            // ----------------------------------------------------
+            // ====================================================
+            // EGL CLEANUP
+            // ====================================================
+
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+
+                if (eglSurface !=
+                        EGL14.EGL_NO_SURFACE) {
+
+                    EGL14.eglMakeCurrent(
+                            eglDisplay,
+                            EGL14.EGL_NO_SURFACE,
+                            EGL14.EGL_NO_SURFACE,
+                            EGL14.EGL_NO_CONTEXT
+                    );
+
+                    EGL14.eglDestroySurface(
+                            eglDisplay,
+                            eglSurface
+                    );
+                }
+
+                if (eglContext !=
+                        EGL14.EGL_NO_CONTEXT) {
+
+                    EGL14.eglDestroyContext(
+                            eglDisplay,
+                            eglContext
+                    );
+                }
+
+                EGL14.eglReleaseThread();
+
+                EGL14.eglTerminate(
+                        eglDisplay
+                );
+            }
+
+            // ====================================================
+            // ENCODER
+            // ====================================================
 
             if (encoder != null) {
+
                 try {
                     encoder.stop();
                 } catch (Exception ignored) {
@@ -569,35 +774,38 @@ public final class VideoGenerator {
                 }
             }
 
-            // ----------------------------------------------------
-            // Release Surface
-            // ----------------------------------------------------
+            // ====================================================
+            // SURFACE
+            // ====================================================
 
-            if (inputSurface != null) {
+            if (encoderSurface != null) {
+
                 try {
-                    inputSurface.release();
+                    encoderSurface.release();
                 } catch (Exception ignored) {
                 }
             }
 
-            // ----------------------------------------------------
-            // Release extractor
-            // ----------------------------------------------------
+            // ====================================================
+            // AUDIO EXTRACTOR
+            // ====================================================
 
             if (audioExtractor != null) {
+
                 try {
                     audioExtractor.release();
                 } catch (Exception ignored) {
                 }
             }
 
-            // ----------------------------------------------------
-            // Stop/release muxer
-            // ----------------------------------------------------
+            // ====================================================
+            // MUXER
+            // ====================================================
 
             if (muxer != null) {
 
                 if (muxerStarted) {
+
                     try {
                         muxer.stop();
                     } catch (Exception ignored) {
@@ -610,77 +818,638 @@ public final class VideoGenerator {
                 }
             }
 
-            // ----------------------------------------------------
-            // Bitmap
-            // ----------------------------------------------------
+            // ====================================================
+            // BITMAP
+            // ====================================================
 
-            if (textBitmap != null &&
-                    !textBitmap.isRecycled()) {
+            if (bitmap != null &&
+                    !bitmap.isRecycled()) {
 
-                textBitmap.recycle();
+                bitmap.recycle();
             }
         }
 
-        // --------------------------------------------------------
-        // Final file validation
-        // --------------------------------------------------------
+        // ========================================================
+        // FINAL FILE CHECK
+        // ========================================================
 
-        if (!outputFile.exists() ||
-                outputFile.length() < 10_000) {
+        if (!outputFile.exists()) {
 
             throw new IOException(
-                    "Video generation failed. Output MP4 is missing or empty: " +
+                    "MP4 was not created: " +
                             outputFile.getAbsolutePath()
+            );
+        }
+
+        if (outputFile.length() < 10_000) {
+
+            throw new IOException(
+                    "Generated MP4 is too small: " +
+                            outputFile.length() +
+                            " bytes"
             );
         }
     }
 
     // ============================================================
-    // DRAW BITMAP TO MEDIACODEC SURFACE
+    // EGL CREATION
     // ============================================================
 
-    private static void drawBitmapToSurface(
-            Surface surface,
-            Bitmap bitmap
+    private static EglObjects createEgl(
+            Surface surface
     ) throws Exception {
 
-        Canvas canvas = null;
+        EGLDisplay display =
+                EGL14.eglGetDisplay(
+                        EGL14.EGL_DEFAULT_DISPLAY
+                );
 
-        try {
+        if (display ==
+                EGL14.EGL_NO_DISPLAY) {
 
-            canvas = surface.lockCanvas(null);
+            throw new IOException(
+                    "Unable to obtain EGL display"
+            );
+        }
 
-            if (canvas == null) {
+        int[] version = new int[2];
+
+        if (!EGL14.eglInitialize(
+                display,
+                version,
+                0,
+                version,
+                1
+        )) {
+
+            throw new IOException(
+                    "Unable to initialize EGL"
+            );
+        }
+
+        /*
+         * RGBA8888 + window surface + recordable.
+         */
+        int[] configAttributes = {
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+
+                EGL14.EGL_RENDERABLE_TYPE,
+                EGL14.EGL_OPENGL_ES2_BIT,
+
+                EGL14.EGL_SURFACE_TYPE,
+                EGL14.EGL_WINDOW_BIT,
+
+                EGL_RECORDABLE_ANDROID,
+                1,
+
+                EGL14.EGL_NONE
+        };
+
+        EGLConfig[] configs =
+                new EGLConfig[1];
+
+        int[] numConfigs = new int[1];
+
+        if (!EGL14.eglChooseConfig(
+                display,
+                configAttributes,
+                0,
+                configs,
+                0,
+                1,
+                numConfigs,
+                0
+        )) {
+
+            throw new IOException(
+                    "eglChooseConfig failed"
+            );
+        }
+
+        if (numConfigs[0] <= 0 ||
+                configs[0] == null) {
+
+            throw new IOException(
+                    "No suitable EGL configuration"
+            );
+        }
+
+        EGLConfig config =
+                configs[0];
+
+        int[] contextAttributes = {
+                EGL14.EGL_CONTEXT_CLIENT_VERSION,
+                2,
+                EGL14.EGL_NONE
+        };
+
+        EGLContext context =
+                EGL14.eglCreateContext(
+                        display,
+                        config,
+                        EGL14.EGL_NO_CONTEXT,
+                        contextAttributes,
+                        0
+                );
+
+        if (context ==
+                EGL14.EGL_NO_CONTEXT) {
+
+            throw new IOException(
+                    "eglCreateContext failed: " +
+                            EGL14.eglGetError()
+            );
+        }
+
+        int[] surfaceAttributes = {
+                EGL14.EGL_NONE
+        };
+
+        EGLSurface eglSurface =
+                EGL14.eglCreateWindowSurface(
+                        display,
+                        config,
+                        surface,
+                        surfaceAttributes,
+                        0
+                );
+
+        if (eglSurface ==
+                EGL14.EGL_NO_SURFACE) {
+
+            EGL14.eglDestroyContext(
+                    display,
+                    context
+            );
+
+            throw new IOException(
+                    "eglCreateWindowSurface failed: " +
+                            EGL14.eglGetError()
+            );
+        }
+
+        if (!EGL14.eglMakeCurrent(
+                display,
+                eglSurface,
+                eglSurface,
+                context
+        )) {
+
+            EGL14.eglDestroySurface(
+                    display,
+                    eglSurface
+            );
+
+            EGL14.eglDestroyContext(
+                    display,
+                    context
+            );
+
+            throw new IOException(
+                    "eglMakeCurrent failed: " +
+                            EGL14.eglGetError()
+            );
+        }
+
+        return new EglObjects(
+                display,
+                context,
+                eglSurface,
+                config
+        );
+    }
+
+    // ============================================================
+    // OPENGL RENDERER
+    // ============================================================
+
+    private static final class GlRenderer {
+
+        private int program;
+
+        private int textureId;
+
+        private int positionLocation;
+
+        private int texCoordLocation;
+
+        private int textureLocation;
+
+        private FloatBuffer vertexBuffer;
+
+        private FloatBuffer texBuffer;
+
+        void initialize(
+                Bitmap bitmap
+        ) throws Exception {
+
+            vertexBuffer =
+                    ByteBuffer
+                            .allocateDirect(
+                                    VERTICES.length * 4
+                            )
+                            .order(
+                                    ByteOrder.nativeOrder()
+                            )
+                            .asFloatBuffer();
+
+            vertexBuffer.put(
+                    VERTICES
+            );
+
+            vertexBuffer.position(0);
+
+            texBuffer =
+                    ByteBuffer
+                            .allocateDirect(
+                                    TEX_COORDS.length * 4
+                            )
+                            .order(
+                                    ByteOrder.nativeOrder()
+                            )
+                            .asFloatBuffer();
+
+            texBuffer.put(
+                    TEX_COORDS
+            );
+
+            texBuffer.position(0);
+
+            int vertexShader =
+                    loadShader(
+                            GLES20.GL_VERTEX_SHADER,
+                            VERTEX_SHADER
+                    );
+
+            int fragmentShader =
+                    loadShader(
+                            GLES20.GL_FRAGMENT_SHADER,
+                            FRAGMENT_SHADER
+                    );
+
+            program =
+                    GLES20.glCreateProgram();
+
+            checkGl(
+                    "glCreateProgram"
+            );
+
+            GLES20.glAttachShader(
+                    program,
+                    vertexShader
+            );
+
+            GLES20.glAttachShader(
+                    program,
+                    fragmentShader
+            );
+
+            GLES20.glLinkProgram(
+                    program
+            );
+
+            int[] linkStatus =
+                    new int[1];
+
+            GLES20.glGetProgramiv(
+                    program,
+                    GLES20.GL_LINK_STATUS,
+                    linkStatus,
+                    0
+            );
+
+            if (linkStatus[0] == 0) {
+
+                String log =
+                        GLES20.glGetProgramInfoLog(
+                                program
+                        );
+
+                GLES20.glDeleteProgram(
+                        program
+                );
+
                 throw new IOException(
-                        "MediaCodec input surface returned null Canvas"
+                        "OpenGL program link failed: " +
+                                log
                 );
             }
 
-            /*
-             * Black background.
-             */
-            canvas.drawColor(Color.BLACK);
-
-            /*
-             * Bitmap is already 1080x1920, so draw directly.
-             */
-            Paint paint = new Paint(
-                    Paint.ANTI_ALIAS_FLAG |
-                            Paint.FILTER_BITMAP_FLAG
+            GLES20.glDeleteShader(
+                    vertexShader
             );
 
-            canvas.drawBitmap(
-                    bitmap,
-                    0f,
-                    0f,
-                    paint
+            GLES20.glDeleteShader(
+                    fragmentShader
             );
 
-        } finally {
+            positionLocation =
+                    GLES20.glGetAttribLocation(
+                            program,
+                            "aPosition"
+                    );
 
-            if (canvas != null) {
-                surface.unlockCanvasAndPost(canvas);
+            texCoordLocation =
+                    GLES20.glGetAttribLocation(
+                            program,
+                            "aTexCoord"
+                    );
+
+            textureLocation =
+                    GLES20.glGetUniformLocation(
+                            program,
+                            "uTexture"
+                    );
+
+            int[] textures =
+                    new int[1];
+
+            GLES20.glGenTextures(
+                    1,
+                    textures,
+                    0
+            );
+
+            textureId =
+                    textures[0];
+
+            if (textureId == 0) {
+
+                throw new IOException(
+                        "Could not create OpenGL texture"
+                );
             }
+
+            GLES20.glBindTexture(
+                    GLES20.GL_TEXTURE_2D,
+                    textureId
+            );
+
+            GLES20.glTexParameteri(
+                    GLES20.GL_TEXTURE_2D,
+                    GLES20.GL_TEXTURE_MIN_FILTER,
+                    GLES20.GL_LINEAR
+            );
+
+            GLES20.glTexParameteri(
+                    GLES20.GL_TEXTURE_2D,
+                    GLES20.GL_TEXTURE_MAG_FILTER,
+                    GLES20.GL_LINEAR
+            );
+
+            GLES20.glTexParameteri(
+                    GLES20.GL_TEXTURE_2D,
+                    GLES20.GL_TEXTURE_WRAP_S,
+                    GLES20.GL_CLAMP_TO_EDGE
+            );
+
+            GLES20.glTexParameteri(
+                    GLES20.GL_TEXTURE_2D,
+                    GLES20.GL_TEXTURE_WRAP_T,
+                    GLES20.GL_CLAMP_TO_EDGE
+            );
+
+            GLUtils.texImage2D(
+                    GLES20.GL_TEXTURE_2D,
+                    0,
+                    bitmap,
+                    0
+            );
+
+            GLES20.glBindTexture(
+                    GLES20.GL_TEXTURE_2D,
+                    0
+            );
+
+            checkGl(
+                    "texture upload"
+            );
+        }
+
+        void draw(
+                int width,
+                int height
+        ) {
+
+            GLES20.glViewport(
+                    0,
+                    0,
+                    width,
+                    height
+            );
+
+            GLES20.glClearColor(
+                    0f,
+                    0f,
+                    0f,
+                    1f
+            );
+
+            GLES20.glClear(
+                    GLES20.GL_COLOR_BUFFER_BIT
+            );
+
+            GLES20.glUseProgram(
+                    program
+            );
+
+            vertexBuffer.position(0);
+
+            GLES20.glEnableVertexAttribArray(
+                    positionLocation
+            );
+
+            GLES20.glVertexAttribPointer(
+                    positionLocation,
+                    2,
+                    GLES20.GL_FLOAT,
+                    false,
+                    0,
+                    vertexBuffer
+            );
+
+            texBuffer.position(0);
+
+            GLES20.glEnableVertexAttribArray(
+                    texCoordLocation
+            );
+
+            GLES20.glVertexAttribPointer(
+                    texCoordLocation,
+                    2,
+                    GLES20.GL_FLOAT,
+                    false,
+                    0,
+                    texBuffer
+            );
+
+            GLES20.glActiveTexture(
+                    GLES20.GL_TEXTURE0
+            );
+
+            GLES20.glBindTexture(
+                    GLES20.GL_TEXTURE_2D,
+                    textureId
+            );
+
+            GLES20.glUniform1i(
+                    textureLocation,
+                    0
+            );
+
+            GLES20.glDrawArrays(
+                    GLES20.GL_TRIANGLE_STRIP,
+                    0,
+                    4
+            );
+
+            GLES20.glBindTexture(
+                    GLES20.GL_TEXTURE_2D,
+                    0
+            );
+
+            GLES20.glDisableVertexAttribArray(
+                    positionLocation
+            );
+
+            GLES20.glDisableVertexAttribArray(
+                    texCoordLocation
+            );
+
+            checkGl(
+                    "draw"
+            );
+        }
+
+        void release() {
+
+            if (textureId != 0) {
+
+                GLES20.glDeleteTextures(
+                        1,
+                        new int[]{textureId},
+                        0
+                );
+
+                textureId = 0;
+            }
+
+            if (program != 0) {
+
+                GLES20.glDeleteProgram(
+                        program
+                );
+
+                program = 0;
+            }
+        }
+
+        private static int loadShader(
+                int type,
+                String source
+        ) throws Exception {
+
+            int shader =
+                    GLES20.glCreateShader(
+                            type
+                    );
+
+            if (shader == 0) {
+
+                throw new IOException(
+                        "glCreateShader failed"
+                );
+            }
+
+            GLES20.glShaderSource(
+                    shader,
+                    source
+            );
+
+            GLES20.glCompileShader(
+                    shader
+            );
+
+            int[] compiled =
+                    new int[1];
+
+            GLES20.glGetShaderiv(
+                    shader,
+                    GLES20.GL_COMPILE_STATUS,
+                    compiled,
+                    0
+            );
+
+            if (compiled[0] == 0) {
+
+                String log =
+                        GLES20.glGetShaderInfoLog(
+                                shader
+                        );
+
+                GLES20.glDeleteShader(
+                        shader
+                );
+
+                throw new IOException(
+                        "OpenGL shader compile failed: " +
+                                log
+                );
+            }
+
+            return shader;
+        }
+
+        private static void checkGl(
+                String operation
+        ) throws RuntimeException {
+
+            int error =
+                    GLES20.glGetError();
+
+            if (error != GLES20.GL_NO_ERROR) {
+
+                throw new RuntimeException(
+                        "OpenGL error during " +
+                                operation +
+                                ": 0x" +
+                                Integer.toHexString(error)
+                );
+            }
+        }
+    }
+
+    // ============================================================
+    // EGL HOLDER
+    // ============================================================
+
+    private static final class EglObjects {
+
+        final EGLDisplay display;
+
+        final EGLContext context;
+
+        final EGLSurface surface;
+
+        final EGLConfig config;
+
+        EglObjects(
+                EGLDisplay display,
+                EGLContext context,
+                EGLSurface surface,
+                EGLConfig config
+        ) {
+
+            this.display = display;
+
+            this.context = context;
+
+            this.surface = surface;
+
+            this.config = config;
         }
     }
 
@@ -693,100 +1462,118 @@ public final class VideoGenerator {
             String verse
     ) throws Exception {
 
-        Bitmap bitmap = Bitmap.createBitmap(
-                VIDEO_WIDTH,
-                VIDEO_HEIGHT,
-                Bitmap.Config.ARGB_8888
+        Bitmap bitmap =
+                Bitmap.createBitmap(
+                        WIDTH,
+                        HEIGHT,
+                        Bitmap.Config.ARGB_8888
+                );
+
+        Canvas canvas =
+                new Canvas(bitmap);
+
+        canvas.drawColor(
+                Color.BLACK
         );
-
-        Canvas canvas = new Canvas(bitmap);
-
-        canvas.drawColor(Color.BLACK);
 
         Typeface typeface;
 
         try {
-            typeface = Typeface.createFromAsset(
-                    context.getAssets(),
-                    "font.ttf"
-            );
+
+            typeface =
+                    Typeface.createFromAsset(
+                            context.getAssets(),
+                            "font.ttf"
+                    );
+
         } catch (Exception e) {
 
             /*
-             * Fallback so video generation does not completely fail
-             * if font.ttf is accidentally missing.
+             * Fallback if font.ttf is missing.
              */
-            typeface = Typeface.create(
-                    Typeface.DEFAULT,
-                    Typeface.NORMAL
-            );
+            typeface =
+                    Typeface.create(
+                            Typeface.DEFAULT,
+                            Typeface.NORMAL
+                    );
         }
 
-        // --------------------------------------------------------
-        // Heading
-        // --------------------------------------------------------
+        // ========================================================
+        // HEADING
+        // ========================================================
 
-        Paint headingPaint = new Paint(
-                Paint.ANTI_ALIAS_FLAG |
-                        Paint.SUBPIXEL_TEXT_FLAG
+        Paint headingPaint =
+                new Paint(
+                        Paint.ANTI_ALIAS_FLAG |
+                                Paint.SUBPIXEL_TEXT_FLAG
+                );
+
+        headingPaint.setTypeface(
+                typeface
         );
 
-        headingPaint.setTypeface(typeface);
-        headingPaint.setColor(HEADING_COLOR);
-        headingPaint.setTextAlign(Paint.Align.CENTER);
-        headingPaint.setTextSize(HEADING_SIZE);
+        headingPaint.setColor(
+                HEADING_COLOR
+        );
+
+        headingPaint.setTextAlign(
+                Paint.Align.CENTER
+        );
+
+        headingPaint.setTextSize(
+                HEADING_SIZE
+        );
 
         Paint.FontMetrics headingMetrics =
                 headingPaint.getFontMetrics();
 
-        float headingHeight =
-                headingMetrics.bottom -
-                        headingMetrics.top;
-
-        /*
-         * Heading is inside top safe area.
-         */
         float headingBaseline =
                 SAFE_TOP -
                         headingMetrics.top;
 
         canvas.drawText(
                 HEADING,
-                VIDEO_WIDTH / 2f,
+                WIDTH / 2f,
                 headingBaseline,
                 headingPaint
         );
+
+        // ========================================================
+        // VERSE
+        // ========================================================
+
+        Paint versePaint =
+                new Paint(
+                        Paint.ANTI_ALIAS_FLAG |
+                                Paint.SUBPIXEL_TEXT_FLAG
+                );
+
+        versePaint.setTypeface(
+                typeface
+        );
+
+        versePaint.setColor(
+                VERSE_COLOR
+        );
+
+        versePaint.setTextAlign(
+                Paint.Align.CENTER
+        );
+
+        float maxWidth =
+                WIDTH -
+                        (SIDE_MARGIN * 2);
 
         float verseTop =
                 headingBaseline +
                         headingMetrics.bottom +
                         HEADING_GAP;
 
-        // --------------------------------------------------------
-        // Verse
-        // --------------------------------------------------------
-
-        Paint versePaint = new Paint(
-                Paint.ANTI_ALIAS_FLAG |
-                        Paint.SUBPIXEL_TEXT_FLAG
-        );
-
-        versePaint.setTypeface(typeface);
-        versePaint.setColor(VERSE_COLOR);
-        versePaint.setTextAlign(Paint.Align.CENTER);
-
-        float maxWidth =
-                VIDEO_WIDTH -
-                        (SIDE_MARGIN * 2);
-
-        /*
-         * Keep verse below heading and above bottom safe area.
-         */
         float maxVerseHeight =
-                VIDEO_HEIGHT -
+                HEIGHT -
                         SAFE_BOTTOM -
                         verseTop -
-                        40f;
+                        30f;
 
         if (maxVerseHeight < 100f) {
             maxVerseHeight = 100f;
@@ -800,45 +1587,66 @@ public final class VideoGenerator {
                         maxVerseHeight
                 );
 
-        versePaint.setTextSize(layout.textSize);
+        versePaint.setTextSize(
+                layout.textSize
+        );
 
         float firstBaseline =
                 verseTop +
                         ((maxVerseHeight -
-                                layout.totalHeight) / 2f) -
+                                layout.totalHeight) /
+                                2f) -
                         layout.fontTop;
 
         /*
-         * Additional safety.
+         * Make absolutely sure bottom safe area isn't violated.
          */
-        float lowestPossible =
+        float lastBaseline =
                 firstBaseline +
                         (layout.lines.size() - 1) *
-                                layout.lineHeight +
+                                layout.lineHeight;
+
+        float lowest =
+                lastBaseline +
                         layout.fontBottom;
 
-        if (lowestPossible >
-                VIDEO_HEIGHT - SAFE_BOTTOM) {
+        float allowedBottom =
+                HEIGHT -
+                        SAFE_BOTTOM;
+
+        if (lowest > allowedBottom) {
 
             firstBaseline -=
-                    lowestPossible -
-                            (VIDEO_HEIGHT - SAFE_BOTTOM);
+                    lowest -
+                            allowedBottom;
+        }
+
+        /*
+         * Also ensure verse isn't pushed above its start.
+         */
+        float highest =
+                firstBaseline +
+                        layout.fontTop;
+
+        if (highest < verseTop) {
+
+            firstBaseline +=
+                    verseTop -
+                            highest;
         }
 
         for (int i = 0;
              i < layout.lines.size();
              i++) {
 
-            String line =
-                    layout.lines.get(i);
-
             float baseline =
                     firstBaseline +
-                            i * layout.lineHeight;
+                            i *
+                                    layout.lineHeight;
 
             canvas.drawText(
-                    line,
-                    VIDEO_WIDTH / 2f,
+                    layout.lines.get(i),
+                    WIDTH / 2f,
                     baseline,
                     versePaint
             );
@@ -858,14 +1666,13 @@ public final class VideoGenerator {
             float maxHeight
     ) {
 
-        /*
-         * Start large and automatically shrink.
-         */
         float size = 72f;
 
         while (size >= 24f) {
 
-            paint.setTextSize(size);
+            paint.setTextSize(
+                    size
+            );
 
             List<String> lines =
                     wrapText(
@@ -886,7 +1693,8 @@ public final class VideoGenerator {
                     lineHeight *
                             lines.size();
 
-            if (totalHeight <= maxHeight) {
+            if (totalHeight <=
+                    maxHeight) {
 
                 return new TextLayoutResult(
                         lines,
@@ -901,11 +1709,9 @@ public final class VideoGenerator {
             size -= 2f;
         }
 
-        // --------------------------------------------------------
-        // Minimum size fallback
-        // --------------------------------------------------------
-
-        paint.setTextSize(24f);
+        paint.setTextSize(
+                24f
+        );
 
         List<String> lines =
                 wrapText(
@@ -946,17 +1752,27 @@ public final class VideoGenerator {
                 new ArrayList<>();
 
         String cleaned =
-                text.replace("\r", " ")
-                        .replace("\n", " ")
+                text.replace(
+                                "\r",
+                                " "
+                        )
+                        .replace(
+                                "\n",
+                                " "
+                        )
                         .trim();
 
         if (cleaned.isEmpty()) {
+
             result.add("");
+
             return result;
         }
 
         String[] words =
-                cleaned.split("\\s+");
+                cleaned.split(
+                        "\\s+"
+                );
 
         StringBuilder current =
                 new StringBuilder();
@@ -968,7 +1784,9 @@ public final class VideoGenerator {
                 if (paint.measureText(word)
                         <= maxWidth) {
 
-                    current.append(word);
+                    current.append(
+                            word
+                    );
 
                 } else {
 
@@ -991,8 +1809,12 @@ public final class VideoGenerator {
             if (paint.measureText(candidate)
                     <= maxWidth) {
 
-                current.append(" ")
-                        .append(word);
+                current.append(
+                                " "
+                        )
+                        .append(
+                                word
+                        );
 
             } else {
 
@@ -1005,7 +1827,9 @@ public final class VideoGenerator {
                 if (paint.measureText(word)
                         <= maxWidth) {
 
-                    current.append(word);
+                    current.append(
+                            word
+                    );
 
                 } else {
 
@@ -1020,6 +1844,7 @@ public final class VideoGenerator {
         }
 
         if (current.length() > 0) {
+
             result.add(
                     current.toString()
             );
@@ -1042,14 +1867,17 @@ public final class VideoGenerator {
              i < word.length();
              i++) {
 
-            char c = word.charAt(i);
+            char c =
+                    word.charAt(i);
 
             String candidate =
-                    part.toString() + c;
+                    part.toString() +
+                            c;
 
             if (part.length() > 0 &&
-                    paint.measureText(candidate)
-                            > maxWidth) {
+                    paint.measureText(
+                            candidate
+                    ) > maxWidth) {
 
                 output.add(
                         part.toString()
@@ -1062,6 +1890,7 @@ public final class VideoGenerator {
         }
 
         if (part.length() > 0) {
+
             output.add(
                     part.toString()
             );
@@ -1093,7 +1922,7 @@ public final class VideoGenerator {
             cached.delete();
         }
 
-        encodeBackgroundMusicToAac(
+        encodeBackgroundMusic(
                 context,
                 cached
         );
@@ -1110,90 +1939,83 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // MP3 -> AAC
-    //
-    // Creates an exactly 8-second AAC/M4A cache.
-    //
-    // If bg.mp3 is shorter than 8 seconds, it loops.
-    // If longer, only the first 8 seconds are used.
+    // MP3 -> 8 SECOND AAC/M4A
     // ============================================================
 
-    private static void encodeBackgroundMusicToAac(
+    private static void encodeBackgroundMusic(
             Context context,
             File output
     ) throws Exception {
 
+        File source =
+                copyAssetToCache(
+                        context,
+                        "bg.mp3",
+                        "bible_bg_source.mp3"
+                );
+
         MediaExtractor extractor = null;
+
         MediaCodec decoder = null;
+
         MediaCodec encoder = null;
+
         MediaMuxer muxer = null;
 
         boolean muxerStarted = false;
 
-        int outputTrack = -1;
-
         try {
-
-            // ----------------------------------------------------
-            // Open MP3 asset
-            // ----------------------------------------------------
-
-            File mp3File =
-                    copyAssetToCache(
-                            context,
-                            "bg.mp3",
-                            "source_bg_music.mp3"
-                    );
 
             extractor =
                     new MediaExtractor();
 
             extractor.setDataSource(
-                    mp3File.getAbsolutePath()
+                    source.getAbsolutePath()
             );
 
             int sourceTrack =
-                    findAudioTrack(extractor);
+                    findAudioTrack(
+                            extractor
+                    );
 
             if (sourceTrack < 0) {
+
                 throw new IOException(
                         "No audio track found in bg.mp3"
                 );
             }
 
-            extractor.selectTrack(sourceTrack);
+            extractor.selectTrack(
+                    sourceTrack
+            );
 
             MediaFormat sourceFormat =
                     extractor.getTrackFormat(
                             sourceTrack
                     );
 
-            String sourceMime =
+            String mime =
                     sourceFormat.getString(
                             MediaFormat.KEY_MIME
                     );
 
-            if (sourceMime == null ||
-                    !sourceMime.startsWith("audio/")) {
+            if (mime == null ||
+                    !mime.startsWith("audio/")) {
 
                 throw new IOException(
-                        "bg.mp3 is not an audio track"
+                        "bg.mp3 audio MIME is invalid"
                 );
             }
 
-            // ----------------------------------------------------
-            // Read sample rate/channels
-            // ----------------------------------------------------
-
             int sampleRate =
-                    getFormatInteger(
+                    getInteger(
                             sourceFormat,
                             MediaFormat.KEY_SAMPLE_RATE,
                             44100
                     );
 
             int channels =
-                    getFormatInteger(
+                    getInteger(
                             sourceFormat,
                             MediaFormat.KEY_CHANNEL_COUNT,
                             2
@@ -1207,13 +2029,13 @@ public final class VideoGenerator {
                 channels = 2;
             }
 
-            // ----------------------------------------------------
-            // Decoder
-            // ----------------------------------------------------
+            // ====================================================
+            // DECODER
+            // ====================================================
 
             decoder =
                     MediaCodec.createDecoderByType(
-                            sourceMime
+                            mime
                     );
 
             decoder.configure(
@@ -1225,49 +2047,41 @@ public final class VideoGenerator {
 
             decoder.start();
 
-            // ----------------------------------------------------
-            // Decode only enough PCM for 8 seconds.
-            //
-            // 16-bit PCM:
-            // sampleRate * channels * 2 bytes * 8 seconds
-            // ----------------------------------------------------
-
-            long targetPcmBytesLong =
+            long targetBytesLong =
                     (long) sampleRate *
                             8L *
                             channels *
                             2L;
 
-            if (targetPcmBytesLong >
+            if (targetBytesLong >
                     Integer.MAX_VALUE) {
 
                 throw new IOException(
-                        "Audio PCM buffer is too large"
+                        "PCM buffer too large"
                 );
             }
 
-            int targetPcmBytes =
-                    (int) targetPcmBytesLong;
+            int targetBytes =
+                    (int) targetBytesLong;
 
-            ByteArrayOutputStream pcmOutput =
+            ByteArrayOutputStream pcm =
                     new ByteArrayOutputStream(
-                            targetPcmBytes
+                            targetBytes
                     );
 
-            boolean inputEOS = false;
-            boolean outputEOS = false;
+            boolean decoderInputEOS =
+                    false;
 
-            byte[] tempBuffer =
+            boolean decoderOutputEOS =
+                    false;
+
+            byte[] temp =
                     new byte[64 * 1024];
 
-            while (!outputEOS &&
-                    pcmOutput.size() < targetPcmBytes) {
+            while (!decoderOutputEOS &&
+                    pcm.size() < targetBytes) {
 
-                // ------------------------------------------------
-                // Feed decoder
-                // ------------------------------------------------
-
-                if (!inputEOS) {
+                if (!decoderInputEOS) {
 
                     int inputIndex =
                             decoder.dequeueInputBuffer(
@@ -1276,41 +2090,46 @@ public final class VideoGenerator {
 
                     if (inputIndex >= 0) {
 
-                        ByteBuffer inputBuffer =
+                        ByteBuffer input =
                                 decoder.getInputBuffer(
                                         inputIndex
                                 );
 
-                        if (inputBuffer != null) {
+                        if (input != null) {
 
-                            int sampleSize =
+                            input.clear();
+
+                            int size =
                                     extractor.readSampleData(
-                                            inputBuffer,
+                                            input,
                                             0
                                     );
 
-                            if (sampleSize < 0) {
+                            if (size < 0) {
 
                                 decoder.queueInputBuffer(
                                         inputIndex,
                                         0,
                                         0,
                                         0,
-                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                        MediaCodec
+                                                .BUFFER_FLAG_END_OF_STREAM
                                 );
 
-                                inputEOS = true;
+                                decoderInputEOS =
+                                        true;
 
                             } else {
 
-                                long presentationTimeUs =
-                                        extractor.getSampleTime();
+                                long pts =
+                                        extractor
+                                                .getSampleTime();
 
                                 decoder.queueInputBuffer(
                                         inputIndex,
                                         0,
-                                        sampleSize,
-                                        presentationTimeUs,
+                                        size,
+                                        pts,
                                         0
                                 );
 
@@ -1319,10 +2138,6 @@ public final class VideoGenerator {
                         }
                     }
                 }
-
-                // ------------------------------------------------
-                // Get decoder output
-                // ------------------------------------------------
 
                 MediaCodec.BufferInfo info =
                         new MediaCodec.BufferInfo();
@@ -1340,35 +2155,35 @@ public final class VideoGenerator {
                             decoder.getOutputFormat();
 
                     sampleRate =
-                            getFormatInteger(
+                            getInteger(
                                     decodedFormat,
                                     MediaFormat.KEY_SAMPLE_RATE,
                                     sampleRate
                             );
 
                     channels =
-                            getFormatInteger(
+                            getInteger(
                                     decodedFormat,
                                     MediaFormat.KEY_CHANNEL_COUNT,
                                     channels
                             );
 
-                    targetPcmBytesLong =
+                    targetBytesLong =
                             (long) sampleRate *
                                     8L *
                                     channels *
                                     2L;
 
-                    if (targetPcmBytesLong >
+                    if (targetBytesLong >
                             Integer.MAX_VALUE) {
 
                         throw new IOException(
-                                "Decoded PCM buffer is too large"
+                                "Decoded PCM buffer too large"
                         );
                     }
 
-                    targetPcmBytes =
-                            (int) targetPcmBytesLong;
+                    targetBytes =
+                            (int) targetBytesLong;
 
                     continue;
                 }
@@ -1392,47 +2207,44 @@ public final class VideoGenerator {
                                         info.size
                         );
 
-                        int remaining =
-                                outputBuffer.remaining();
-
                         int wanted =
                                 Math.min(
-                                        remaining,
-                                        targetPcmBytes -
-                                                pcmOutput.size()
+                                        outputBuffer.remaining(),
+                                        targetBytes -
+                                                pcm.size()
                                 );
 
-                        if (wanted > 0) {
+                        while (wanted > 0) {
 
-                            while (wanted > 0) {
+                            int count =
+                                    Math.min(
+                                            wanted,
+                                            temp.length
+                                    );
 
-                                int count =
-                                        Math.min(
-                                                wanted,
-                                                tempBuffer.length
-                                        );
+                            outputBuffer.get(
+                                    temp,
+                                    0,
+                                    count
+                            );
 
-                                outputBuffer.get(
-                                        tempBuffer,
-                                        0,
-                                        count
-                                );
+                            pcm.write(
+                                    temp,
+                                    0,
+                                    count
+                            );
 
-                                pcmOutput.write(
-                                        tempBuffer,
-                                        0,
-                                        count
-                                );
-
-                                wanted -= count;
-                            }
+                            wanted -= count;
                         }
                     }
 
                     if ((info.flags &
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            MediaCodec
+                                    .BUFFER_FLAG_END_OF_STREAM)
+                            != 0) {
 
-                        outputEOS = true;
+                        decoderOutputEOS =
+                                true;
                     }
 
                     decoder.releaseOutputBuffer(
@@ -1443,29 +2255,39 @@ public final class VideoGenerator {
             }
 
             byte[] sourcePcm =
-                    pcmOutput.toByteArray();
+                    pcm.toByteArray();
 
             if (sourcePcm.length == 0) {
+
                 throw new IOException(
-                        "bg.mp3 produced no PCM audio"
+                        "bg.mp3 decoded to zero PCM bytes"
                 );
             }
 
-            // ----------------------------------------------------
-            // Create exactly 8 seconds of PCM.
-            // ----------------------------------------------------
+            /*
+             * Create exactly 8 seconds.
+             *
+             * If the MP3 is shorter, loop it.
+             */
+            targetBytes =
+                    (int) (
+                            (long) sampleRate *
+                                    8L *
+                                    channels *
+                                    2L
+                    );
 
             byte[] finalPcm =
-                    new byte[targetPcmBytes];
+                    new byte[targetBytes];
 
-            if (sourcePcm.length >= targetPcmBytes) {
+            if (sourcePcm.length >= targetBytes) {
 
                 System.arraycopy(
                         sourcePcm,
                         0,
                         finalPcm,
                         0,
-                        targetPcmBytes
+                        targetBytes
                 );
 
             } else {
@@ -1473,12 +2295,12 @@ public final class VideoGenerator {
                 int position = 0;
 
                 while (position <
-                        targetPcmBytes) {
+                        targetBytes) {
 
                     int count =
                             Math.min(
                                     sourcePcm.length,
-                                    targetPcmBytes -
+                                    targetBytes -
                                             position
                             );
 
@@ -1494,13 +2316,13 @@ public final class VideoGenerator {
                 }
             }
 
-            // ----------------------------------------------------
-            // AAC encoder
-            // ----------------------------------------------------
+            // ====================================================
+            // AAC ENCODER
+            // ====================================================
 
             MediaFormat aacFormat =
                     MediaFormat.createAudioFormat(
-                            MIME_AUDIO,
+                            AUDIO_MIME,
                             sampleRate,
                             channels
                     );
@@ -1510,10 +2332,6 @@ public final class VideoGenerator {
                     2
             );
 
-            /*
-             * 128 kbps is plenty for background music and
-             * considerably smaller/faster than high bitrates.
-             */
             aacFormat.setInteger(
                     MediaFormat.KEY_BIT_RATE,
                     128_000
@@ -1521,12 +2339,12 @@ public final class VideoGenerator {
 
             aacFormat.setInteger(
                     MediaFormat.KEY_MAX_INPUT_SIZE,
-                    16384
+                    16_384
             );
 
             encoder =
                     MediaCodec.createEncoderByType(
-                            MIME_AUDIO
+                            AUDIO_MIME
                     );
 
             encoder.configure(
@@ -1538,36 +2356,33 @@ public final class VideoGenerator {
 
             encoder.start();
 
-            // ----------------------------------------------------
-            // AAC muxer
-            // ----------------------------------------------------
+            // ====================================================
+            // AUDIO MUXER
+            // ====================================================
 
             muxer =
                     new MediaMuxer(
                             output.getAbsolutePath(),
-                            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                            MediaMuxer.OutputFormat
+                                    .MUXER_OUTPUT_MPEG_4
                     );
+
+            int audioTrack = -1;
 
             int pcmPosition = 0;
 
-            boolean encoderInputEOS = false;
-            boolean encoderOutputEOS = false;
+            boolean inputEOS = false;
 
-            long audioPtsUs = 0;
+            boolean outputEOS = false;
 
-            /*
-             * Number of bytes per PCM audio frame.
-             */
+            long ptsUs = 0;
+
             int bytesPerFrame =
                     channels * 2;
 
-            while (!encoderOutputEOS) {
+            while (!outputEOS) {
 
-                // ------------------------------------------------
-                // Feed PCM to AAC encoder
-                // ------------------------------------------------
-
-                if (!encoderInputEOS) {
+                if (!inputEOS) {
 
                     int inputIndex =
                             encoder.dequeueInputBuffer(
@@ -1576,21 +2391,19 @@ public final class VideoGenerator {
 
                     if (inputIndex >= 0) {
 
-                        ByteBuffer inputBuffer =
+                        ByteBuffer input =
                                 encoder.getInputBuffer(
                                         inputIndex
                                 );
 
-                        if (inputBuffer == null) {
+                        if (input == null) {
+
                             throw new IOException(
-                                    "AAC encoder input buffer is null"
+                                    "AAC input buffer is null"
                             );
                         }
 
-                        inputBuffer.clear();
-
-                        int capacity =
-                                inputBuffer.remaining();
+                        input.clear();
 
                         int remaining =
                                 finalPcm.length -
@@ -1602,24 +2415,24 @@ public final class VideoGenerator {
                                     inputIndex,
                                     0,
                                     0,
-                                    audioPtsUs,
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                    ptsUs,
+                                    MediaCodec
+                                            .BUFFER_FLAG_END_OF_STREAM
                             );
 
-                            encoderInputEOS = true;
+                            inputEOS = true;
 
                         } else {
 
-                            /*
-                             * Keep PCM chunks aligned to complete
-                             * audio frames.
-                             */
                             int count =
                                     Math.min(
-                                            capacity,
+                                            input.remaining(),
                                             remaining
                                     );
 
+                            /*
+                             * Keep complete PCM frames.
+                             */
                             count -=
                                     count %
                                             bytesPerFrame;
@@ -1628,42 +2441,39 @@ public final class VideoGenerator {
                                 count =
                                         Math.min(
                                                 remaining,
-                                                capacity
+                                                input.remaining()
                                         );
                             }
 
-                            inputBuffer.put(
+                            input.put(
                                     finalPcm,
                                     pcmPosition,
                                     count
                             );
 
-                            long frameCount =
+                            long frames =
                                     count /
                                             bytesPerFrame;
 
                             long durationUs =
-                                    (frameCount *
-                                            1_000_000L) /
+                                    frames *
+                                            1_000_000L /
                                             sampleRate;
 
                             encoder.queueInputBuffer(
                                     inputIndex,
                                     0,
                                     count,
-                                    audioPtsUs,
+                                    ptsUs,
                                     0
                             );
 
                             pcmPosition += count;
-                            audioPtsUs += durationUs;
+
+                            ptsUs += durationUs;
                         }
                     }
                 }
-
-                // ------------------------------------------------
-                // Drain AAC encoder
-                // ------------------------------------------------
 
                 MediaCodec.BufferInfo info =
                         new MediaCodec.BufferInfo();
@@ -1677,18 +2487,12 @@ public final class VideoGenerator {
                 if (outputIndex ==
                         MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
 
-                    if (muxerStarted) {
-                        throw new IllegalStateException(
-                                "AAC output format changed twice"
-                        );
-                    }
-
-                    MediaFormat actualAacFormat =
+                    MediaFormat actualFormat =
                             encoder.getOutputFormat();
 
-                    outputTrack =
+                    audioTrack =
                             muxer.addTrack(
-                                    actualAacFormat
+                                    actualFormat
                             );
 
                     muxer.start();
@@ -1710,7 +2514,9 @@ public final class VideoGenerator {
                             muxerStarted) {
 
                         if ((info.flags &
-                                MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                                MediaCodec
+                                        .BUFFER_FLAG_CODEC_CONFIG)
+                                == 0) {
 
                             outputBuffer.position(
                                     info.offset
@@ -1722,7 +2528,7 @@ public final class VideoGenerator {
                             );
 
                             muxer.writeSampleData(
-                                    outputTrack,
+                                    audioTrack,
                                     outputBuffer,
                                     info
                             );
@@ -1730,9 +2536,11 @@ public final class VideoGenerator {
                     }
 
                     if ((info.flags &
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            MediaCodec
+                                    .BUFFER_FLAG_END_OF_STREAM)
+                            != 0) {
 
-                        encoderOutputEOS = true;
+                        outputEOS = true;
                     }
 
                     encoder.releaseOutputBuffer(
@@ -1745,6 +2553,7 @@ public final class VideoGenerator {
         } finally {
 
             if (decoder != null) {
+
                 try {
                     decoder.stop();
                 } catch (Exception ignored) {
@@ -1757,6 +2566,7 @@ public final class VideoGenerator {
             }
 
             if (encoder != null) {
+
                 try {
                     encoder.stop();
                 } catch (Exception ignored) {
@@ -1769,6 +2579,7 @@ public final class VideoGenerator {
             }
 
             if (extractor != null) {
+
                 try {
                     extractor.release();
                 } catch (Exception ignored) {
@@ -1778,6 +2589,7 @@ public final class VideoGenerator {
             if (muxer != null) {
 
                 if (muxerStarted) {
+
                     try {
                         muxer.stop();
                     } catch (Exception ignored) {
@@ -1793,12 +2605,12 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // WRITE AUDIO SAMPLES
+    // WRITE AUDIO TRACK
     // ============================================================
 
     private static void writeAudioSamples(
             MediaExtractor extractor,
-            int audioTrackIndex,
+            int track,
             MediaMuxer muxer
     ) throws Exception {
 
@@ -1810,33 +2622,28 @@ public final class VideoGenerator {
         MediaCodec.BufferInfo info =
                 new MediaCodec.BufferInfo();
 
-        long maxPts =
-                8_000_000L;
-
         boolean wroteAudio = false;
 
         while (true) {
 
             buffer.clear();
 
-            int sampleSize =
+            int size =
                     extractor.readSampleData(
                             buffer,
                             0
                     );
 
-            if (sampleSize < 0) {
+            if (size < 0) {
                 break;
             }
 
-            long sampleTime =
+            long pts =
                     extractor.getSampleTime();
 
-            if (sampleTime < 0) {
-                break;
-            }
+            if (pts < 0 ||
+                    pts >= VIDEO_DURATION_US) {
 
-            if (sampleTime >= maxPts) {
                 break;
             }
 
@@ -1845,13 +2652,13 @@ public final class VideoGenerator {
 
             info.set(
                     0,
-                    sampleSize,
-                    sampleTime,
+                    size,
+                    pts,
                     flags
             );
 
             muxer.writeSampleData(
-                    audioTrackIndex,
+                    track,
                     buffer,
                     info
             );
@@ -1864,6 +2671,7 @@ public final class VideoGenerator {
         }
 
         if (!wroteAudio) {
+
             throw new IOException(
                     "No AAC audio samples were written"
             );
@@ -1901,7 +2709,7 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // COPY ASSET TO CACHE
+    // COPY ASSET
     // ============================================================
 
     private static File copyAssetToCache(
@@ -1927,10 +2735,16 @@ public final class VideoGenerator {
             output.delete();
         }
 
-        try (java.io.InputStream input =
-                     context.getAssets().open(assetName);
-             java.io.FileOutputStream outputStream =
-                     new java.io.FileOutputStream(output)) {
+        try (
+                InputStream input =
+                        context.getAssets()
+                                .open(assetName);
+
+                FileOutputStream outputStream =
+                        new FileOutputStream(
+                                output
+                        )
+        ) {
 
             byte[] buffer =
                     new byte[64 * 1024];
@@ -1963,25 +2777,28 @@ public final class VideoGenerator {
     }
 
     // ============================================================
-    // FORMAT INTEGER HELPER
+    // FORMAT INTEGER
     // ============================================================
 
-    private static int getFormatInteger(
+    private static int getInteger(
             MediaFormat format,
             String key,
-            int defaultValue
+            int fallback
     ) {
 
         try {
 
             if (format.containsKey(key)) {
-                return format.getInteger(key);
+
+                return format.getInteger(
+                        key
+                );
             }
 
         } catch (Exception ignored) {
         }
 
-        return defaultValue;
+        return fallback;
     }
 
     // ============================================================
@@ -1991,10 +2808,15 @@ public final class VideoGenerator {
     private static final class TextLayoutResult {
 
         final List<String> lines;
+
         final float textSize;
+
         final float lineHeight;
+
         final float totalHeight;
+
         final float fontTop;
+
         final float fontBottom;
 
         TextLayoutResult(
@@ -2007,36 +2829,16 @@ public final class VideoGenerator {
         ) {
 
             this.lines = lines;
+
             this.textSize = textSize;
+
             this.lineHeight = lineHeight;
+
             this.totalHeight = totalHeight;
+
             this.fontTop = fontTop;
+
             this.fontBottom = fontBottom;
         }
-    }
-
-    // ============================================================
-    // SMALL MEDIACODEC CONSTANT HOLDER
-    //
-    // Keeps this file compatible without depending on newer
-    // MediaCodec constant names.
-    // ============================================================
-
-    private static final class MediaCodecInfoCompat {
-
-        /*
-         * MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-         */
-        static final int COLOR_FORMAT_SURFACE = 0x7F000789;
-
-        /*
-         * AVC Baseline profile.
-         */
-        static final int AVC_PROFILE_BASELINE = 1;
-
-        /*
-         * AVC Level 3.1.
-         */
-        static final int AVC_LEVEL_31 = 256;
     }
 }
