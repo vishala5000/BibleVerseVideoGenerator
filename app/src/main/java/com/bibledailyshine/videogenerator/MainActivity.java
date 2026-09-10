@@ -1,12 +1,12 @@
 package com.bibledailyshine.videogenerator;
 
 import android.app.Activity;
-import android.os.Bundle;
-import android.os.Environment;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
-import android.provider.Settings;
+import android.os.Bundle;
+import android.os.Environment;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -17,6 +17,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.FileProvider;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,137 +26,210 @@ import java.util.List;
 public class MainActivity extends Activity {
 
     private EditText verseInput;
+
     private Button generateButton;
-    private TextView statusText;
+
+    private Button shareButton;
+
     private ProgressBar progressBar;
 
+    private TextView statusText;
+
     private File outputDirectory;
+
     private File zipFile;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+
         super.onCreate(savedInstanceState);
 
-        createOutputDirectory();
-        buildUserInterface();
-    }
-
-    private void createOutputDirectory() {
-
-        outputDirectory = new File(
-                getExternalFilesDir(Environment.DIRECTORY_MOVIES),
-                "BibleVerseVideos"
-        );
+        outputDirectory =
+                new File(
+                        getExternalFilesDir(
+                                Environment.DIRECTORY_MOVIES
+                        ),
+                        "BibleVerseVideos"
+                );
 
         if (!outputDirectory.exists()) {
             outputDirectory.mkdirs();
         }
+
+        buildUI();
     }
 
-    private void buildUserInterface() {
+    private int dp(float value) {
 
-        LinearLayout root = new LinearLayout(this);
+        return (int) (
+                value *
+                getResources()
+                        .getDisplayMetrics()
+                        .density
+        );
+    }
 
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(32, 40, 32, 32);
-        root.setBackgroundColor(Color.BLACK);
+    private TextView makeText(
+            String text,
+            float size,
+            int color
+    ) {
 
-        ScrollView scrollView = new ScrollView(this);
+        TextView view =
+                new TextView(this);
 
-        LinearLayout content = new LinearLayout(this);
+        view.setText(text);
+        view.setTextSize(size);
+        view.setTextColor(color);
 
-        content.setOrientation(LinearLayout.VERTICAL);
+        return view;
+    }
 
-        TextView title = new TextView(this);
+    private void buildUI() {
 
-        title.setText("Bible Verse Video Generator");
-        title.setTextColor(Color.YELLOW);
-        title.setTextSize(25);
-        title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 0, 0, 25);
+        LinearLayout root =
+                new LinearLayout(this);
+
+        root.setOrientation(
+                LinearLayout.VERTICAL
+        );
+
+        root.setBackgroundColor(
+                Color.BLACK
+        );
+
+        root.setPadding(
+                dp(18),
+                dp(20),
+                dp(18),
+                dp(18)
+        );
+
+        ScrollView scroll =
+                new ScrollView(this);
+
+        LinearLayout content =
+                new LinearLayout(this);
+
+        content.setOrientation(
+                LinearLayout.VERTICAL
+        );
+
+        TextView title =
+                makeText(
+                        "Bible Verse Video Generator",
+                        24,
+                        Color.YELLOW
+                );
+
+        title.setGravity(
+                Gravity.CENTER
+        );
+
+        title.setTypeface(
+                null,
+                android.graphics.Typeface.BOLD
+        );
 
         content.addView(
                 title,
                 new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
+                        -1,
+                        -2
                 )
         );
 
-        TextView instructions = new TextView(this);
+        TextView info =
+                makeText(
+                        "\nEnter one Bible verse per line.\n\n" +
+                        "Each line creates a separate 8-second video.\n\n" +
+                        "Example:\n" +
+                        "In the beginning God created the heaven and the earth.\n" +
+                        "For God so loved the world that he gave his only begotten Son.\n" +
+                        "I can do all things through Christ which strengtheneth me.",
+                        16,
+                        Color.WHITE
+                );
 
-        instructions.setText(
-                "Enter one Bible verse per line.\n\n" +
-                "Each line will create a separate 8-second video.\n\n" +
-                "Example:\n" +
-                "In the beginning God created the heaven and the earth.\n" +
-                "And God said, Let there be light: and there was light.\n" +
-                "For God so loved the world..."
+        info.setPadding(
+                0,
+                dp(10),
+                0,
+                dp(12)
         );
 
-        instructions.setTextColor(Color.WHITE);
-        instructions.setTextSize(16);
-        instructions.setPadding(0, 0, 0, 20);
+        content.addView(info);
 
-        content.addView(instructions);
-
-        verseInput = new EditText(this);
+        verseInput =
+                new EditText(this);
 
         verseInput.setHint(
-                "Enter verses here...\nOne verse per line"
+                "Enter verses here...\n\nOne verse per line"
         );
 
-        verseInput.setHintTextColor(Color.GRAY);
-        verseInput.setTextColor(Color.BLACK);
+        verseInput.setHintTextColor(
+                Color.rgb(100, 100, 100)
+        );
+
+        verseInput.setTextColor(
+                Color.BLACK
+        );
+
         verseInput.setTextSize(17);
 
         verseInput.setGravity(
                 Gravity.TOP | Gravity.START
         );
 
-        verseInput.setPadding(20, 20, 20, 20);
-
-        verseInput.setBackgroundColor(Color.WHITE);
-
         verseInput.setSingleLine(false);
 
-        verseInput.setMinLines(10);
-
         verseInput.setInputType(
-                android.text.InputType.TYPE_CLASS_TEXT |
-                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE |
-                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                InputType.TYPE_CLASS_TEXT |
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE |
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        );
+
+        verseInput.setPadding(
+                dp(15),
+                dp(15),
+                dp(15),
+                dp(15)
+        );
+
+        verseInput.setBackgroundColor(
+                Color.WHITE
         );
 
         content.addView(
                 verseInput,
                 new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        500
+                        -1,
+                        dp(360)
                 )
         );
 
-        TextView fixedSettings = new TextView(this);
+        TextView settings =
+                makeText(
+                        "\nFIXED VIDEO SETTINGS\n\n" +
+                        "Heading: Bible Verse\n" +
+                        "Resolution: 1080 × 1920\n" +
+                        "Duration: 8 seconds\n" +
+                        "Video: H.264 / AVC\n" +
+                        "Background: Black\n" +
+                        "Heading: Yellow\n" +
+                        "Verse: White\n" +
+                        "Top no-text zone: 200 px\n" +
+                        "Bottom no-text zone: 200 px\n" +
+                        "Font: font.ttf\n" +
+                        "Music: bg.mp3",
+                        15,
+                        Color.LTGRAY
+                );
 
-        fixedSettings.setText(
-                "\nVideo settings\n\n" +
-                "Heading: Bible Verse\n" +
-                "Resolution: 1080 × 1920\n" +
-                "Duration: 8 seconds\n" +
-                "Codec: H.264 / AVC\n" +
-                "Background: Black\n" +
-                "Heading: Yellow\n" +
-                "Verse: White\n" +
-                "Top safe area: 200 px\n" +
-                "Bottom safe area: 200 px"
-        );
+        content.addView(settings);
 
-        fixedSettings.setTextColor(Color.LTGRAY);
-        fixedSettings.setTextSize(15);
-
-        content.addView(fixedSettings);
-
-        generateButton = new Button(this);
+        generateButton =
+                new Button(this);
 
         generateButton.setText(
                 "GENERATE VIDEOS"
@@ -163,38 +238,77 @@ public class MainActivity extends Activity {
         content.addView(
                 generateButton,
                 new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        65
+                        -1,
+                        dp(58)
                 )
         );
 
-        progressBar = new ProgressBar(this);
+        progressBar =
+                new ProgressBar(this);
 
-        progressBar.setVisibility(View.GONE);
+        progressBar.setVisibility(
+                View.GONE
+        );
+
+        LinearLayout.LayoutParams progressParams =
+                new LinearLayout.LayoutParams(
+                        -2,
+                        -2
+                );
+
+        progressParams.gravity =
+                Gravity.CENTER;
 
         content.addView(
                 progressBar,
-                new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+                progressParams
         );
 
-        statusText = new TextView(this);
+        statusText =
+                makeText(
+                        "",
+                        15,
+                        Color.WHITE
+                );
 
-        statusText.setTextColor(Color.WHITE);
-        statusText.setTextSize(15);
-        statusText.setGravity(Gravity.CENTER);
-        statusText.setPadding(0, 20, 0, 20);
+        statusText.setGravity(
+                Gravity.CENTER
+        );
+
+        statusText.setPadding(
+                0,
+                dp(15),
+                0,
+                dp(15)
+        );
 
         content.addView(statusText);
 
-        scrollView.addView(content);
+        shareButton =
+                new Button(this);
+
+        shareButton.setText(
+                "SAVE / SHARE ZIP"
+        );
+
+        shareButton.setVisibility(
+                View.GONE
+        );
+
+        content.addView(
+                shareButton,
+                new LinearLayout.LayoutParams(
+                        -1,
+                        dp(58)
+                )
+        );
+
+        scroll.addView(content);
 
         root.addView(
-                scrollView,
+                scroll,
                 new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        -1,
                         0,
                         1
                 )
@@ -203,62 +317,91 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         generateButton.setOnClickListener(
-                v -> startGeneration()
+                v -> generateVideos()
+        );
+
+        shareButton.setOnClickListener(
+                v -> shareZip()
         );
     }
 
-    private void startGeneration() {
+    private List<String> readVerses() {
 
-        String allText = verseInput.getText().toString();
+        String text =
+                verseInput
+                        .getText()
+                        .toString();
 
-        if (allText.trim().isEmpty()) {
+        String[] lines =
+                text.split(
+                        "\\r?\\n"
+                );
 
-            Toast.makeText(
-                    this,
-                    "Please enter at least one verse.",
-                    Toast.LENGTH_SHORT
-            ).show();
-
-            return;
-        }
-
-        String[] lines = allText.split("\\r?\\n");
-
-        List<String> verses = new ArrayList<>();
+        List<String> verses =
+                new ArrayList<>();
 
         for (String line : lines) {
 
-            String cleaned = line.trim();
+            String cleaned =
+                    line.trim();
 
             if (!cleaned.isEmpty()) {
                 verses.add(cleaned);
             }
         }
 
+        return verses;
+    }
+
+    private void generateVideos() {
+
+        List<String> verses =
+                readVerses();
+
         if (verses.isEmpty()) {
+
+            Toast.makeText(
+                    this,
+                    "Enter at least one verse.",
+                    Toast.LENGTH_SHORT
+            ).show();
+
             return;
         }
 
-        generateButton.setEnabled(false);
+        generateButton.setEnabled(
+                false
+        );
 
-        progressBar.setVisibility(View.VISIBLE);
+        shareButton.setVisibility(
+                View.GONE
+        );
+
+        progressBar.setVisibility(
+                View.VISIBLE
+        );
 
         statusText.setText(
-                "Preparing " + verses.size() + " video(s)..."
+                "Starting..."
         );
 
         new Thread(() -> {
 
             try {
 
-                deleteOldVideos();
+                cleanOutputDirectory();
 
-                List<File> generatedFiles =
+                List<File> files =
                         new ArrayList<>();
 
-                for (int i = 0; i < verses.size(); i++) {
+                for (int i = 0;
+                     i < verses.size();
+                     i++) {
 
-                    final int number = i + 1;
+                    int number = i + 1;
+
+                    String verse =
+                            verses.get(i);
 
                     runOnUiThread(() ->
                             statusText.setText(
@@ -269,33 +412,35 @@ public class MainActivity extends Activity {
                             )
                     );
 
-                    File output = new File(
-                            outputDirectory,
-                            number + ".mp4"
-                    );
+                    File output =
+                            new File(
+                                    outputDirectory,
+                                    number + ".mp4"
+                            );
 
                     VideoGenerator.generate(
-                            this,
-                            verses.get(i),
+                            MainActivity.this,
+                            verse,
                             output
                     );
 
-                    generatedFiles.add(output);
+                    files.add(output);
                 }
 
                 runOnUiThread(() ->
                         statusText.setText(
-                                "Creating ZIP file..."
+                                "Creating ZIP..."
                         )
                 );
 
-                zipFile = new File(
-                        outputDirectory,
-                        "BibleVerseVideos.zip"
-                );
+                zipFile =
+                        new File(
+                                outputDirectory,
+                                "BibleVerseVideos.zip"
+                        );
 
                 ZipUtils.createZip(
-                        generatedFiles,
+                        files,
                         zipFile
                 );
 
@@ -305,20 +450,24 @@ public class MainActivity extends Activity {
                             View.GONE
                     );
 
-                    generateButton.setEnabled(true);
+                    generateButton.setEnabled(
+                            true
+                    );
+
+                    shareButton.setVisibility(
+                            View.VISIBLE
+                    );
 
                     statusText.setText(
                             "DONE\n\n" +
-                            generatedFiles.size() +
-                            " video(s) created.\n\n" +
-                            "ZIP ready."
+                            files.size() +
+                            " video(s) generated.\n\n" +
+                            "ZIP is ready."
                     );
-
-                    showShareButton();
 
                     Toast.makeText(
                             MainActivity.this,
-                            "Videos generated successfully.",
+                            "Generation complete.",
                             Toast.LENGTH_LONG
                     ).show();
                 });
@@ -333,16 +482,23 @@ public class MainActivity extends Activity {
                             View.GONE
                     );
 
-                    generateButton.setEnabled(true);
+                    generateButton.setEnabled(
+                            true
+                    );
 
                     statusText.setText(
-                            "ERROR:\n" +
-                            e.getMessage()
+                            "ERROR\n\n" +
+                            e.getClass()
+                                    .getSimpleName() +
+                            "\n\n" +
+                            String.valueOf(
+                                    e.getMessage()
+                            )
                     );
 
                     Toast.makeText(
                             MainActivity.this,
-                            "Generation failed.",
+                            "Video generation failed.",
                             Toast.LENGTH_LONG
                     ).show();
                 });
@@ -351,7 +507,7 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private void deleteOldVideos() {
+    private void cleanOutputDirectory() {
 
         if (!outputDirectory.exists()) {
             outputDirectory.mkdirs();
@@ -373,44 +529,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showShareButton() {
-
-        Button shareButton =
-                new Button(this);
-
-        shareButton.setText(
-                "SAVE / SHARE ZIP"
-        );
-
-        ((LinearLayout)
-                ((ScrollView)
-                        findViewById(
-                                android.R.id.content
-                        )
-                ).getChildAt(0)
-        );
-
-        shareButton.setOnClickListener(
-                v -> shareZip()
-        );
-
-        View root = findViewById(
-                android.R.id.content
-        );
-
-        if (root instanceof View) {
-
-            addContentView(
-                    shareButton,
-                    new android.widget.FrameLayout.LayoutParams(
-                            -1,
-                            65,
-                            Gravity.BOTTOM
-                    )
-            );
-        }
-    }
-
     private void shareZip() {
 
         if (zipFile == null ||
@@ -426,13 +544,12 @@ public class MainActivity extends Activity {
         }
 
         Uri uri =
-                androidx.core.content.FileProvider
-                        .getUriForFile(
-                                this,
-                                getPackageName() +
-                                ".fileprovider",
-                                zipFile
-                        );
+                FileProvider.getUriForFile(
+                        this,
+                        getPackageName()
+                                + ".fileprovider",
+                        zipFile
+                );
 
         Intent intent =
                 new Intent(
@@ -455,7 +572,7 @@ public class MainActivity extends Activity {
         startActivity(
                 Intent.createChooser(
                         intent,
-                        "Save or share ZIP"
+                        "Save or share BibleVerseVideos.zip"
                 )
         );
     }
