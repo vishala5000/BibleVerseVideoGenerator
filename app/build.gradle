@@ -7,11 +7,9 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.bibledailyshine.videogenerator'
-
+        applicationId "com.bibledailyshine.videogenerator"
         minSdk 26
         targetSdk 36
-
         versionCode 1
         versionName "1.0"
     }
@@ -22,9 +20,15 @@ android {
             shrinkResources false
 
             proguardFiles(
-                    getDefaultProguardFile('proguard-android-optimize.txt'),
+                    getDefaultProguardFile(
+                            'proguard-android-optimize.txt'
+                    ),
                     'proguard-rules.pro'
             )
         }
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.17.0'
 }
